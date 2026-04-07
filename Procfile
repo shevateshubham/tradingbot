@@ -1,1 +1,1 @@
-web: PYTHONPATH=/app python /app/mcp_server/server.py
+web: python mcp_server/server.py
