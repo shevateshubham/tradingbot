@@ -154,6 +154,34 @@ def format_signal_message(signal_data: dict) -> str:
         if opts_str:
             opts_strategy_section = esc(opts_str) + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
 
+    # Institutional evidence section
+    inst_evidence = d.get("institutional_evidence", [])
+    inst_section = ""
+    if inst_evidence:
+        ev_lines = "\n".join([f"  • {esc(str(e))}" for e in inst_evidence[:4]])
+        inst_section = f"🏛 *INSTITUTIONAL EVIDENCE*\n{ev_lines}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+
+    # Options strategy section
+    opts_sig = d.get("options_signal")
+    opts_strategy_section = ""
+    if opts_sig and getattr(opts_sig, "valid", False):
+        try:
+            from mcp_server.tools.options_strategy import format_options_signal
+            opts_str = format_options_signal(opts_sig, lots=1)
+            if opts_str:
+                opts_strategy_section = esc(opts_str) + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        except Exception:
+            pass
+
+    # Session badge
+    session_name = d.get("session", "")
+    session_badge = ""
+    if session_name == "NEW_YORK": session_badge = "🗽 NY Session"
+    elif session_name == "LONDON": session_badge = "🇬🇧 London Session"
+    elif session_name == "INDIA":  session_badge = "🇮🇳 India Session"
+    elif session_name == "EVENING":session_badge = "🌙 Evening Session"
+    else: session_badge = session_name
+
     opts_line = ""
     if opts_bias:
         pcr_str = f"PCR {pcr:.2f} " if pcr else ""
@@ -195,6 +223,7 @@ def format_signal_message(signal_data: dict) -> str:
 
     msg = (
         f"🎯 *SMC SIGNAL — {instrument} \\[{segment}\\]*\n"
+        f"🕐 {esc(session_badge)}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 Direction   : {direction_emoji} *{direction}*\n"
         f"⭐ Grade       : *{grade_prefix}{esc(grade)}*\n"
@@ -229,6 +258,8 @@ def format_signal_message(signal_data: dict) -> str:
         f"🕐 Signal Time    : {signal_time}\n"
         f"⏳ Expires By     : {expiry}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{inst_section}"
+        f"{opts_strategy_section}"
         f"{inst_section}"
         f"{opts_strategy_section}"
         f"📌 {narrative}\n"
