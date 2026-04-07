@@ -7,10 +7,11 @@ FastAPI application with:
   - APScheduler: daily summaries + weekly analysis + price tracker
 """
 
-import asyncio
-import logging
 import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, date
 from typing import Optional
