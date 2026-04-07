@@ -54,22 +54,22 @@ async def send_step1(update,context,session,edit=False):
     user=await get_or_create_user(session,chat_id)
     selected=user.markets_enabled or []
     text=(
-        "👋 *Welcome to SMC Trading Bot*\n\n"
+        "👋 Welcome to SMC Trading Bot\n\n"
         "I scan markets using institutional SMC analysis:\n"
         "• Wyckoff Method • Volume Analysis\n"
         "• Liquidity Engineering • Trap Detection\n\n"
-        "🕐 *Market Schedule:*\n"
-        "🏦 Indices + F&O → 9:15 AM \\- 3:30 PM IST\n"
-        "🥇 Gold \\+ Forex → 3:30 PM \\- 12:00 AM IST\n"
-        "😴 Sleep → 12:00 AM \\- 9:15 AM IST\n\n"
+        "Market Schedule:\n"
+        "🏦 Indices + F&O: 9:15 AM - 3:30 PM IST\n"
+        "🥇 Gold + Forex: 3:30 PM - 12:00 AM IST\n"
+        "😴 Sleep: 12:00 AM - 9:15 AM IST\n\n"
         "Select your markets below:"
     )
     kb=build_market_keyboard(selected)
     if edit and update.callback_query:
-        await update.callback_query.edit_message_text(text,reply_markup=kb,parse_mode="MarkdownV2")
+        await update.callback_query.edit_message_text(text,reply_markup=kb,parse_mode="HTML")
     else:
         target=update.message or update.callback_query.message
-        await target.reply_text(text,reply_markup=kb,parse_mode="MarkdownV2")
+        await target.reply_text(text,reply_markup=kb,parse_mode="HTML")
 
 def build_timeframe_keyboard(selected_tf):
     rows=[]
@@ -89,10 +89,10 @@ async def send_step2(update,context,session,edit=True):
     )
     kb=build_timeframe_keyboard(tf)
     if edit and update.callback_query:
-        await update.callback_query.edit_message_text(text,reply_markup=kb,parse_mode="MarkdownV2")
+        await update.callback_query.edit_message_text(text,reply_markup=kb,parse_mode="HTML")
     else:
         target=update.message or update.callback_query.message
-        await target.reply_text(text,reply_markup=kb,parse_mode="MarkdownV2")
+        await target.reply_text(text,reply_markup=kb,parse_mode="HTML")
 
 def build_quality_keyboard(selected_qf):
     rows=[]
@@ -113,10 +113,10 @@ async def send_step3(update,context,session,edit=True):
     )
     kb=build_quality_keyboard(qf)
     if edit and update.callback_query:
-        await update.callback_query.edit_message_text(text,reply_markup=kb,parse_mode="MarkdownV2")
+        await update.callback_query.edit_message_text(text,reply_markup=kb,parse_mode="HTML")
     else:
         target=update.message or update.callback_query.message
-        await target.reply_text(text,reply_markup=kb,parse_mode="MarkdownV2")
+        await target.reply_text(text,reply_markup=kb,parse_mode="HTML")
 
 async def send_step4(update,context,session,edit=True):
     chat_id=str(update.effective_chat.id)
@@ -147,10 +147,10 @@ async def send_step4(update,context,session,edit=True):
         InlineKeyboardButton("⚙️ Change Settings",callback_data="onboard_step1")
     ]])
     if edit and update.callback_query:
-        await update.callback_query.edit_message_text(text,reply_markup=kb,parse_mode="MarkdownV2")
+        await update.callback_query.edit_message_text(text,reply_markup=kb,parse_mode="HTML")
     else:
         target=update.message or update.callback_query.message
-        await target.reply_text(text,reply_markup=kb,parse_mode="MarkdownV2")
+        await target.reply_text(text,reply_markup=kb,parse_mode="HTML")
 
 async def handle_onboard_callback(update,context,session):
     query=update.callback_query
@@ -212,12 +212,12 @@ async def handle_onboard_callback(update,context,session):
         stmt=sql_update(UserPreferences).where(UserPreferences.chat_id==chat_id).values(setup_complete=True)
         await session.execute(stmt);await session.commit()
         await query.edit_message_text(
-            "🚀 *Bot is now active\\!*\n\n"
+            "🚀 🚀 Bot is now active!\n\n"
             "I will automatically send signals when institutional setups are detected\\.\n\n"
             "📊 Use /markets to change settings anytime\n"
             "📈 Use /status to check bot health\n"
             "📋 Use /help for all commands",
-            parse_mode="MarkdownV2"
+            parse_mode="HTML"
         )
 
 # Alias for backward compatibility
