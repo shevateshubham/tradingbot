@@ -1,0 +1,35 @@
+name: Deploy to Railway
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Deploy to Railway
+        uses: bervProject/railway-deploy@main
+        with:
+          railway_token: ${{ secrets.RAILWAY_TOKEN }}
+          service: smc-trading-bot
+
+      - name: Notify deployment success
+        if: success()
+        run: |
+          echo "✅ Deployment to Railway successful"
+          echo "Commit: ${{ github.sha }}"
+          echo "Branch: ${{ github.ref_name }}"
+
+      - name: Notify deployment failure
+        if: failure()
+        run: |
+          echo "❌ Deployment to Railway failed"
+          echo "Check Railway logs for details"
+          exit 1
