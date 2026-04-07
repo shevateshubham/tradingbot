@@ -435,6 +435,7 @@ async def lifespan(app: FastAPI):
     )
 
     _scheduler.start()
+    asyncio.create_task(start_live_engine())
     logger.info("Scheduler started: price_tracker, india_summary, global_summary, weekly_analysis")
 
     yield  # ── Server running ───────────────────────────────────────
@@ -529,3 +530,26 @@ if __name__ == "__main__":
         access_log=True,
         reload=False,
     )
+
+
+async def start_live_engine():
+    """Start live data engine - runs during market hours only."""
+    try:
+        from mcp_server.tools.live_data_engine import get_live_engine
+        from mcp_server.tools.telegram_bot import send_signal_to_telegram
+        settings = get_settings()
+        engine = get_live_engine()
+        async def on_signal(signal_data):
+            try:
+                await send_signal_to_telegram(
+                    _telegram_app.bot,
+                    settings.telegram_chat_id,
+                    signal_data
+                )
+            except Exception as e:
+                logger.error(f"Signal send error: {e}")
+        engine.set_signal_callback(on_signal)
+        logger.info("Starting live data engine...")
+        await engine.run()
+    except Exception as e:
+        logger.error(f"Live engine startup error: {e}", exc_info=True)
