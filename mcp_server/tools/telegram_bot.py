@@ -138,6 +138,22 @@ def format_signal_message(signal_data: dict) -> str:
     def chk(val: bool) -> str:
         return "✅" if val else "❌"
 
+    # Institutional evidence
+    inst_evidence = d.get("institutional_evidence", [])
+    inst_section = ""
+    if inst_evidence:
+        inst_lines = "\n".join([f"  • {esc(str(e))}" for e in inst_evidence[:4]])
+        inst_section = f"🏛 *INSTITUTIONAL EVIDENCE*\n{inst_lines}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+
+    # Options strategy section
+    opts_sig = d.get("options_signal")
+    opts_strategy_section = ""
+    if opts_sig and hasattr(opts_sig, "valid") and opts_sig.valid:
+        from mcp_server.tools.options_strategy import format_options_signal
+        opts_str = format_options_signal(opts_sig, lots=1)
+        if opts_str:
+            opts_strategy_section = esc(opts_str) + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+
     opts_line = ""
     if opts_bias:
         pcr_str = f"PCR {pcr:.2f} " if pcr else ""
@@ -213,6 +229,8 @@ def format_signal_message(signal_data: dict) -> str:
         f"🕐 Signal Time    : {signal_time}\n"
         f"⏳ Expires By     : {expiry}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{inst_section}"
+        f"{opts_strategy_section}"
         f"📌 {narrative}\n"
         f"\n_{esc(mode_str)}_"
     )
