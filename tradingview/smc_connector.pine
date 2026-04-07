@@ -1,0 +1,450 @@
+// ═══════════════════════════════════════════════════════════════
+// SMC Connector — Smart Money Concepts Indicator v1.0
+// Pure OHLCV price action. Zero indicators of any kind.
+// Sends webhook alerts to Railway.app server.
+// ═══════════════════════════════════════════════════════════════
+//@version=5
+indicator("SMC Connector", shorttitle="SMC", overlay=true, max_boxes_count=200, max_lines_count=300, max_labels_count=200)
+
+// ── User Inputs ───────────────────────────────────────────────────
+i_swing_len      = input.int(3, "Swing Lookback (bars)", minval=2, maxval=5, group="Structure")
+i_show_sessions  = input.bool(true, "Show Session Boxes", group="Display")
+i_show_zones     = input.bool(true, "Show Premium/Discount Zones", group="Display")
+i_show_pdh_pdl   = input.bool(true, "Show PDH/PDL Lines", group="Display")
+i_min_ob_str     = input.int(1, "Min OB Strength to Show (stars)", minval=1, maxval=3, group="Order Blocks")
+i_show_levels    = input.bool(true, "Show Entry/SL/TP Lines", group="Signals")
+i_webhook_secret = input.string("YOUR_TV_WEBHOOK_SECRET", "Webhook Secret", group="Webhook")
+
+// ── Colours ───────────────────────────────────────────────────────
+BULL_OB_COL    = color.new(color.green, 80)
+BEAR_OB_COL    = color.new(color.red, 80)
+BULL_OB_BORDER = color.new(color.green, 20)
+BEAR_OB_BORDER = color.new(color.red, 20)
+FVG_BULL_COL   = color.new(color.teal, 85)
+FVG_BEAR_COL   = color.new(color.orange, 85)
+BOS_COL        = color.blue
+CHOCH_COL      = color.orange
+SWING_H_COL    = color.new(color.aqua, 0)
+SWING_L_COL    = color.new(color.fuchsia, 0)
+PREMIUM_COL    = color.new(color.red, 93)
+DISCOUNT_COL   = color.new(color.green, 93)
+EQ_COL         = color.new(color.white, 60)
+BSL_COL        = color.new(color.aqua, 30)
+SSL_COL        = color.new(color.fuchsia, 30)
+SESS_ASIA_COL  = color.new(color.blue, 90)
+SESS_LONDON_COL= color.new(color.yellow, 90)
+SESS_NY_COL    = color.new(color.purple, 90)
+
+// ── Session times (IST → UTC offset for TradingView) ──────────────
+// TradingView uses exchange time. Adjust offsets if needed.
+// IST = UTC+5:30.  Asia open 02:30 IST = 21:00 UTC prev day
+// London open 13:30 IST = 08:00 UTC
+// NY open 18:30 IST = 13:00 UTC
+
+f_in_session(sess_start_h, sess_start_m, sess_end_h, sess_end_m) =>
+    t = time("1", session.regular)
+    h = hour(time, "Asia/Kolkata")
+    m = minute(time, "Asia/Kolkata")
+    mins = h * 60 + m
+    start_mins = sess_start_h * 60 + sess_start_m
+    end_mins   = sess_end_h   * 60 + sess_end_m
+    mins >= start_mins and mins <= end_mins
+
+in_asia   = f_in_session(2, 30, 6, 30)
+in_london = f_in_session(13, 30, 17, 30)
+in_ny     = f_in_session(18, 30, 23, 30)
+in_india  = f_in_session(9, 15, 15, 30)
+
+// Killzone: ±30 min from each session open
+f_in_killzone() =>
+    h = hour(time, "Asia/Kolkata")
+    m = minute(time, "Asia/Kolkata")
+    mins = h * 60 + m
+    asia_open   = 2  * 60 + 30
+    london_open = 13 * 60 + 30
+    ny_open     = 18 * 60 + 30
+    india_open  = 9  * 60 + 15
+    math.abs(mins - asia_open)   <= 30 or
+     math.abs(mins - london_open) <= 30 or
+     math.abs(mins - ny_open)     <= 30 or
+     math.abs(mins - india_open)  <= 30
+
+in_killzone = f_in_killzone()
+
+f_active_session() =>
+    in_london ? "LONDON" : in_ny ? "NY" : in_asia ? "ASIA" : in_india ? "INDIA" : "NONE"
+
+// ── Swing High / Low Detection ────────────────────────────────────
+// Pure candle math: bar[i] is swing high if highest of ±N bars
+// Only count if candle body > 40% of total range
+
+f_body_pct(o, h, l, c) =>
+    rng = h - l
+    rng > 0 ? math.abs(c - o) / rng : 0.0
+
+is_swing_high = true
+is_swing_low  = true
+for i = 1 to i_swing_len
+    if high[i_swing_len] < high[i] or high[i_swing_len] < high[i_swing_len + i]
+        is_swing_high := false
+    if low[i_swing_len] > low[i] or low[i_swing_len] > low[i_swing_len + i]
+        is_swing_low := false
+
+// Body filter: ignore doji-like candles as swings
+body_ok_high = f_body_pct(open[i_swing_len], high[i_swing_len], low[i_swing_len], close[i_swing_len]) >= 0.4
+body_ok_low  = body_ok_high
+
+swing_high = is_swing_high and body_ok_high
+swing_low  = is_swing_low  and body_ok_low
+
+// Plot swing triangles
+plotshape(swing_high, style=shape.triangledown, location=location.abovebar, color=SWING_H_COL, size=size.tiny, offset=-i_swing_len)
+plotshape(swing_low,  style=shape.triangleup,   location=location.belowbar, color=SWING_L_COL, size=size.tiny, offset=-i_swing_len)
+
+// ── Market Structure Tracking ─────────────────────────────────────
+var float last_swing_high = na
+var float last_swing_low  = na
+var float last_lower_high = na   // for downtrend structure
+var float last_higher_low = na   // for uptrend structure
+var bool  trend_up        = false
+var int   bos_bar         = na
+var int   choch_bar       = na
+
+if swing_high
+    last_swing_high := high[i_swing_len]
+if swing_low
+    last_swing_low  := low[i_swing_len]
+
+// BOS: close above last swing high (bullish) or below last swing low (bearish)
+bos_bull  = not na(last_swing_high) and close > last_swing_high and close[1] <= last_swing_high
+bos_bear  = not na(last_swing_low)  and close < last_swing_low  and close[1] >= last_swing_low
+
+// CHOCH: close above last LH in downtrend, or below last HL in uptrend
+choch_bull = not trend_up and not na(last_lower_high) and close > last_lower_high
+choch_bear = trend_up     and not na(last_higher_low) and close < last_higher_low
+
+if bos_bull or choch_bull
+    trend_up := true
+if bos_bear or choch_bear
+    trend_up := false
+
+if bos_bull
+    label.new(bar_index, high, "BOS", style=label.style_label_down, color=BOS_COL, textcolor=color.white, size=size.small)
+if bos_bear
+    label.new(bar_index, low, "BOS", style=label.style_label_up,   color=BOS_COL, textcolor=color.white, size=size.small)
+if choch_bull
+    label.new(bar_index, high, "CHOCH", style=label.style_label_down, color=CHOCH_COL, textcolor=color.white, size=size.small)
+if choch_bear
+    label.new(bar_index, low, "CHOCH", style=label.style_label_up,   color=CHOCH_COL, textcolor=color.white, size=size.small)
+
+// ── Order Block Detection ─────────────────────────────────────────
+// Bullish OB: last bearish candle before bullish BOS/CHOCH
+// Bearish OB: last bullish candle before bearish BOS/CHOCH
+
+var float bull_ob_high = na
+var float bull_ob_low  = na
+var float bear_ob_high = na
+var float bear_ob_low  = na
+var box   bull_ob_box  = na
+var box   bear_ob_box  = na
+
+// OB volume ratio (vs recent average) as strength indicator
+avg_vol_20 = math.sum(volume, 20) / 20
+ob_vol_ratio_bull = bos_bull or choch_bull ? volume[1] / avg_vol_20 : na
+ob_vol_ratio_bear = bos_bear or choch_bear ? volume[1] / avg_vol_20 : na
+
+f_ob_stars(vol_ratio) =>
+    vol_ratio >= 2.0 ? "★★★" : vol_ratio >= 1.5 ? "★★" : "★"
+
+// Draw bullish OB box on BOS/CHOCH bullish
+if (bos_bull or choch_bull) and close[1] < open[1]   // last candle was bearish
+    bull_ob_high := high[1]
+    bull_ob_low  := low[1]
+    str_label     = f_ob_stars(nz(ob_vol_ratio_bull, 1.0))
+    if not na(bull_ob_box)
+        box.delete(bull_ob_box)
+    bull_ob_box  := box.new(bar_index - 1, bull_ob_high, bar_index + 50, bull_ob_low,
+         border_color=BULL_OB_BORDER, bgcolor=BULL_OB_COL, border_style=line.style_solid)
+    label.new(bar_index - 1, bull_ob_high, "OB " + str_label,
+         style=label.style_label_right, color=color.new(color.green,50), textcolor=color.white, size=size.small)
+
+// Draw bearish OB box on BOS/CHOCH bearish
+if (bos_bear or choch_bear) and close[1] > open[1]   // last candle was bullish
+    bear_ob_high := high[1]
+    bear_ob_low  := low[1]
+    str_label     = f_ob_stars(nz(ob_vol_ratio_bear, 1.0))
+    if not na(bear_ob_box)
+        box.delete(bear_ob_box)
+    bear_ob_box  := box.new(bar_index - 1, bear_ob_high, bar_index + 50, bear_ob_low,
+         border_color=BEAR_OB_BORDER, bgcolor=BEAR_OB_COL, border_style=line.style_solid)
+    label.new(bar_index - 1, bear_ob_high, "OB " + str_label,
+         style=label.style_label_right, color=color.new(color.red,50), textcolor=color.white, size=size.small)
+
+// Mitigation: change OB box border to dashed when price enters it
+if not na(bull_ob_high) and low <= bull_ob_high and low >= bull_ob_low
+    if not na(bull_ob_box)
+        box.set_border_style(bull_ob_box, line.style_dashed)
+
+if not na(bear_ob_low) and high >= bear_ob_low and high <= bear_ob_high
+    if not na(bear_ob_box)
+        box.set_border_style(bear_ob_box, line.style_dashed)
+
+// ── Fair Value Gap Detection ──────────────────────────────────────
+// Bullish FVG: bar[i+1].low > bar[i-1].high  (gap between candles)
+// Bearish FVG: bar[i+1].high < bar[i-1].low
+
+bull_fvg = low > high[2]     // current low > 2 bars ago high
+bear_fvg = high < low[2]     // current high < 2 bars ago low
+
+var box fvg_box = na
+if bull_fvg
+    fvg_box := box.new(bar_index - 1, low, bar_index + 30, high[2],
+         border_color=color.new(color.teal, 50), bgcolor=FVG_BULL_COL, border_style=line.style_dotted)
+if bear_fvg
+    fvg_box := box.new(bar_index - 1, high, bar_index + 30, low[2],
+         border_color=color.new(color.orange, 50), bgcolor=FVG_BEAR_COL, border_style=line.style_dotted)
+
+// ── Liquidity: BSL / SSL ──────────────────────────────────────────
+// EQH: 2+ swing highs within 0.1% → buy stops above
+// EQL: 2+ swing lows  within 0.1% → sell stops below
+
+var float bsl_level = na
+var float ssl_level = na
+
+if swing_high and not na(last_swing_high)
+    pct_diff = math.abs(high[i_swing_len] - last_swing_high) / last_swing_high
+    if pct_diff <= 0.001
+        bsl_level := math.max(high[i_swing_len], last_swing_high)
+
+if swing_low and not na(last_swing_low)
+    pct_diff = math.abs(low[i_swing_len] - last_swing_low) / last_swing_low
+    if pct_diff <= 0.001
+        ssl_level := math.min(low[i_swing_len], last_swing_low)
+
+// Liquidity sweep: wick beyond level, close back inside
+liq_sweep_bull = not na(ssl_level) and low < ssl_level and close > ssl_level
+liq_sweep_bear = not na(bsl_level) and high > bsl_level and close < bsl_level
+
+if liq_sweep_bull
+    label.new(bar_index, low, "⚡", style=label.style_label_up, color=color.new(color.teal,30), textcolor=color.white)
+if liq_sweep_bear
+    label.new(bar_index, high, "⚡", style=label.style_label_down, color=color.new(color.fuchsia,30), textcolor=color.white)
+
+// BSL / SSL dotted lines
+var line bsl_line = na
+var line ssl_line = na
+if not na(bsl_level)
+    if not na(bsl_line) then line.delete(bsl_line)
+    bsl_line := line.new(bar_index - 20, bsl_level, bar_index + 30, bsl_level,
+         color=BSL_COL, style=line.style_dotted, width=1)
+if not na(ssl_level)
+    if not na(ssl_line) then line.delete(ssl_line)
+    ssl_line := line.new(bar_index - 20, ssl_level, bar_index + 30, ssl_level,
+         color=SSL_COL, style=line.style_dotted, width=1)
+
+// ── Premium / Discount Zones ──────────────────────────────────────
+// Equilibrium = 50% of current swing range
+// Discount below 50%, Premium above 50%
+
+var float swing_range_high = na
+var float swing_range_low  = na
+
+if swing_high then swing_range_high := high[i_swing_len]
+if swing_low  then swing_range_low  := low[i_swing_len]
+
+equilibrium = not na(swing_range_high) and not na(swing_range_low) ?
+     (swing_range_high + swing_range_low) / 2 : na
+
+in_premium  = not na(equilibrium) and close > equilibrium
+in_discount = not na(equilibrium) and close < equilibrium
+
+if i_show_zones and not na(equilibrium)
+    // Equilibrium line
+    line.new(bar_index - 1, equilibrium, bar_index + 1, equilibrium,
+         color=EQ_COL, style=line.style_dashed, width=1)
+
+    // Shade premium / discount zones (done via bgcolor for current bar)
+bgcolor(i_show_zones and in_premium  ? PREMIUM_COL  : na, title="Premium Zone")
+bgcolor(i_show_zones and in_discount ? DISCOUNT_COL : na, title="Discount Zone")
+
+// ── PDH / PDL Lines ───────────────────────────────────────────────
+pdh = request.security(syminfo.tickerid, "D", high[1],  lookahead=barmerge.lookahead_on)
+pdl = request.security(syminfo.tickerid, "D", low[1],   lookahead=barmerge.lookahead_on)
+pwh = request.security(syminfo.tickerid, "W", high[1],  lookahead=barmerge.lookahead_on)
+pwl = request.security(syminfo.tickerid, "W", low[1],   lookahead=barmerge.lookahead_on)
+
+plot(i_show_pdh_pdl ? pdh : na, "PDH", color=color.new(color.gray, 40), style=plot.style_linebr, linewidth=1)
+plot(i_show_pdh_pdl ? pdl : na, "PDL", color=color.new(color.gray, 40), style=plot.style_linebr, linewidth=1)
+plot(i_show_pdh_pdl ? pwh : na, "PWH", color=color.new(color.gray, 20), style=plot.style_linebr, linewidth=2)
+plot(i_show_pdh_pdl ? pwl : na, "PWL", color=color.new(color.gray, 20), style=plot.style_linebr, linewidth=2)
+
+// ── Session Boxes ─────────────────────────────────────────────────
+var box sess_box = na
+var string last_session = "NONE"
+
+current_sess = f_active_session()
+sess_changed = current_sess != last_session and current_sess != "NONE"
+
+if i_show_sessions
+    if sess_changed
+        sess_col = current_sess == "ASIA" ? SESS_ASIA_COL :
+             current_sess == "LONDON" ? SESS_LONDON_COL : SESS_NY_COL
+        if not na(sess_box)
+            box.set_right(sess_box, bar_index)
+        sess_box := box.new(bar_index, high, bar_index + 1, low,
+             bgcolor=sess_col, border_color=color.new(color.gray, 80))
+    else if current_sess != "NONE" and not na(sess_box)
+        box.set_right(sess_box, bar_index + 1)
+        box.set_top(sess_box, math.max(box.get_top(sess_box), high))
+        box.set_bottom(sess_box, math.min(box.get_bottom(sess_box), low))
+
+last_session := current_sess
+
+// ── Trap Detection ────────────────────────────────────────────────
+// Bull Trap: close above EQH → close below within 3 bars + rejection vol > breakout vol
+var int   bsl_break_bar = na
+var float bsl_break_vol = na
+
+if not na(bsl_level) and close > bsl_level
+    bsl_break_bar := bar_index
+    bsl_break_vol := volume
+
+bull_trap = not na(bsl_break_bar) and
+     bar_index - bsl_break_bar <= 3 and
+     close < bsl_level and
+     volume > nz(bsl_break_vol, 0)
+
+// Bear Trap: opposite
+var int   ssl_break_bar = na
+var float ssl_break_vol = na
+
+if not na(ssl_level) and close < ssl_level
+    ssl_break_bar := bar_index
+    ssl_break_vol := volume
+
+bear_trap = not na(ssl_break_bar) and
+     bar_index - ssl_break_bar <= 3 and
+     close > ssl_level and
+     volume > nz(ssl_break_vol, 0)
+
+// Judas: first 15-min move at session open against HTF trend
+judas_signal = in_killzone and
+     ((trend_up and close < open and bar_index == bos_bar + 1) or
+      (not trend_up and close > open and bar_index == choch_bar + 1))
+
+if bull_trap
+    label.new(bar_index, high, "🪤 BULL TRAP", style=label.style_label_down,
+         color=color.new(color.red, 20), textcolor=color.white, size=size.small)
+if bear_trap
+    label.new(bar_index, low, "🪤 BEAR TRAP", style=label.style_label_up,
+         color=color.new(color.green, 20), textcolor=color.white, size=size.small)
+if judas_signal
+    label.new(bar_index, trend_up ? low : high, "⚠️ JUDAS",
+         style=trend_up ? label.style_label_up : label.style_label_down,
+         color=color.new(color.orange, 30), textcolor=color.white, size=size.small)
+
+// ── Dashboard Table ───────────────────────────────────────────────
+var table dash = table.new(position.top_right, 2, 7,
+     bgcolor=color.new(color.black, 70), border_color=color.new(color.gray, 50),
+     border_width=1, frame_color=color.new(color.gray,30), frame_width=1)
+
+if barstate.islast
+    // Session info
+    sess_name = f_active_session()
+    table.cell(dash, 0, 0, "Session", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 0, sess_name, text_color=color.white, text_size=size.small)
+
+    // HTF bias
+    bias_str   = trend_up ? "↑ BULLISH" : "↓ BEARISH"
+    bias_col   = trend_up ? color.green : color.red
+    table.cell(dash, 0, 1, "Daily Bias", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 1, bias_str, text_color=bias_col, text_size=size.small)
+
+    // Killzone
+    kz_str = in_killzone ? "✅ ACTIVE" : "—"
+    kz_col = in_killzone ? color.yellow : color.gray
+    table.cell(dash, 0, 2, "Killzone", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 2, kz_str, text_color=kz_col, text_size=size.small)
+
+    // OB status
+    ob_str = (not na(bull_ob_high) ? "Bull OB " + str.tostring(math.round(bull_ob_high)) : "") +
+             (not na(bear_ob_low)  ? " Bear OB " + str.tostring(math.round(bear_ob_high)) : "")
+    table.cell(dash, 0, 3, "Order Blocks", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 3, ob_str == "" ? "None" : ob_str, text_color=color.white, text_size=size.small)
+
+    // Liquidity
+    liq_str = (not na(bsl_level) ? "BSL " + str.tostring(math.round(bsl_level)) + " " : "") +
+              (not na(ssl_level) ? "SSL " + str.tostring(math.round(ssl_level)) : "")
+    table.cell(dash, 0, 4, "Liquidity", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 4, liq_str == "" ? "None" : liq_str, text_color=color.aqua, text_size=size.small)
+
+    // Zone
+    zone_str = in_premium ? "📈 Premium" : in_discount ? "📉 Discount" : "⚖️ Equilibrium"
+    zone_col = in_premium ? color.red : in_discount ? color.green : color.gray
+    table.cell(dash, 0, 5, "Zone", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 5, zone_str, text_color=zone_col, text_size=size.small)
+
+    // Traps today (approximation)
+    trap_str = bull_trap or bear_trap ? "⚠️ TRAP ACTIVE" : "None"
+    trap_col = bull_trap or bear_trap ? color.orange : color.gray
+    table.cell(dash, 0, 6, "Traps", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 6, trap_str, text_color=trap_col, text_size=size.small)
+
+// ── Alert Conditions ──────────────────────────────────────────────
+// Set webhook URL in TradingView alert dialog (Notifications tab).
+// Paste the JSON template into the Message field.
+
+// OB Entry signals (primary)
+bull_ob_entry = not na(bull_ob_high) and low <= bull_ob_high and low >= bull_ob_low and close > open
+bear_ob_entry = not na(bear_ob_high) and high >= bear_ob_low and high <= bear_ob_high and close < open
+
+alertcondition(bull_ob_entry, "Bullish OB Entry",  "Bullish OB entry signal detected")
+alertcondition(bear_ob_entry, "Bearish OB Entry",  "Bearish OB entry signal detected")
+
+// Structure breaks
+alertcondition(bos_bull,   "Bullish BOS",   "Bullish Break of Structure")
+alertcondition(bos_bear,   "Bearish BOS",   "Bearish Break of Structure")
+alertcondition(choch_bull, "Bullish CHOCH", "Bullish Change of Character — reversal signal")
+alertcondition(choch_bear, "Bearish CHOCH", "Bearish Change of Character — reversal signal")
+
+// Liquidity sweeps
+alertcondition(liq_sweep_bull, "Bullish Sweep", "SSL swept — look for long entries")
+alertcondition(liq_sweep_bear, "Bearish Sweep", "BSL swept — look for short entries")
+
+// Traps
+alertcondition(bull_trap, "Bull Trap Confirmed", "Bull trap confirmed — reversal expected")
+alertcondition(bear_trap, "Bear Trap Confirmed", "Bear trap confirmed — reversal expected")
+
+// A+ setup: OB + FVG + Liquidity swept + Killzone (all together)
+aplus_long  = bull_ob_entry and bull_fvg[1] and liq_sweep_bull and in_killzone
+aplus_short = bear_ob_entry and bear_fvg[1] and liq_sweep_bear and in_killzone
+alertcondition(aplus_long,  "A+ LONG Setup",  "A+ Long setup forming — high confluence")
+alertcondition(aplus_short, "A+ SHORT Setup", "A+ Short setup forming — high confluence")
+
+// ══════════════════════════════════════════════════════════════════
+// WEBHOOK ALERT MESSAGE TEMPLATE
+// Copy the JSON below into TradingView alert Message field.
+// Replace YOUR_TV_WEBHOOK_SECRET with your actual secret.
+//
+// {
+//   "secret": "YOUR_TV_WEBHOOK_SECRET",
+//   "instrument": "{{ticker}}",
+//   "exchange": "{{exchange}}",
+//   "timeframe": "{{interval}}",
+//   "signal_type": "OB_ENTRY",
+//   "direction": "LONG",
+//   "structure": "CHOCH",
+//   "ob_high": {{high}},
+//   "ob_low": {{low}},
+//   "ob_mid": 0,
+//   "fvg_present": true,
+//   "liquidity_swept": true,
+//   "session": "LONDON",
+//   "htf_bias": "BULLISH",
+//   "in_discount": true,
+//   "trap_present": false,
+//   "volume_ratio": 1.8,
+//   "close": {{close}},
+//   "timestamp": "{{timenow}}"
+// }
+// ══════════════════════════════════════════════════════════════════
