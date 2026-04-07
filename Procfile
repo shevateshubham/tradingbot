@@ -1,1 +1,1 @@
-web: cd /app && python -m mcp_server.server
+web: PYTHONPATH=/app python /app/mcp_server/server.py
