@@ -260,3 +260,24 @@ def setup_logging() -> None:
     logging.getLogger("asyncio").setLevel(logging.WARNING)
     logging.getLogger("telegram").setLevel(logging.WARNING)
     logging.getLogger("apscheduler").setLevel(logging.WARNING)
+
+MARKET_LABELS = {
+    "INDIAN_STOCKS": "Indian Stocks",
+    "INDIAN_FNO": "Indian F&O",
+    "INDICES": "Indices",
+    "COMMODITY": "Commodity MCX",
+    "CURRENCY_FOREX": "Currency Forex",
+    "CRYPTO": "Crypto",
+    "GLOBAL_INDICES": "Global Indices",
+}
+TF_LABELS = {
+    "SCALP": "Scalp 1m-5m",
+    "INTRADAY": "Intraday 15m-1H",
+    "SWING": "Swing 4H-Daily",
+    "ALL": "All Timeframes",
+}
+QF_LABELS = {
+    "APLUS_ONLY": "Only A+ Setups max 2/day",
+    "A_AND_APLUS": "A and A+ Setups max 5/day",
+    "ALL_SCORED": "All Scored Setups up to 8/day",
+}
