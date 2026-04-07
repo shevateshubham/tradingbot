@@ -1,1 +1,1 @@
-web: python mcp_server/server.py
+web: cd /app && python -m mcp_server.server
