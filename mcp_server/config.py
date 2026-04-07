@@ -193,6 +193,7 @@ MAX_SPREAD_PERCENT = 0.15
 BROKERAGE_FLAT = 20.0       # ₹20 flat per order (F&O / Indian)
 GST_RATE = 0.18             # 18% GST on brokerage + exchange + SEBI
 SEBI_TURNOVER_CHARGE = 10   # ₹10 per crore
+MIN_RR_RATIO = 2.0          # Minimum risk:reward ratio
 
 CHARGES_CONFIG = {
     "INDICES": {
