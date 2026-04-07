@@ -1,0 +1,81 @@
+//@version=5
+indicator("SMC Connector", shorttitle="SMC", overlay=true, max_boxes_count=200, max_lines_count=300, max_labels_count=200)
+i_swing_len = input.int(3, "Swing Lookback", minval=2, maxval=5)
+i_show_zones = input.bool(true, "Show Zones")
+f_body_pct(o, h, l, c) =>
+    rng = h - l
+    rng > 0 ? math.abs(c - o) / rng : 0.0
+is_swing_high = true
+is_swing_low = true
+for i = 1 to i_swing_len
+    if high[i_swing_len] < high[i] or high[i_swing_len] < high[i_swing_len + i]
+        is_swing_high := false
+    if low[i_swing_len] > low[i] or low[i_swing_len] > low[i_swing_len + i]
+        is_swing_low := false
+body_ok = f_body_pct(open[i_swing_len], high[i_swing_len], low[i_swing_len], close[i_swing_len]) >= 0.4
+swing_high = is_swing_high and body_ok
+swing_low = is_swing_low and body_ok
+plotshape(swing_high, style=shape.triangledown, location=location.abovebar, color=color.aqua, size=size.tiny, offset=-i_swing_len)
+plotshape(swing_low, style=shape.triangleup, location=location.belowbar, color=color.fuchsia, size=size.tiny, offset=-i_swing_len)
+var float last_swing_high = na
+var float last_swing_low = na
+var bool trend_up = false
+if swing_high
+    last_swing_high := high[i_swing_len]
+if swing_low
+    last_swing_low := low[i_swing_len]
+bos_bull = not na(last_swing_high) and close > last_swing_high and close[1] <= last_swing_high
+bos_bear = not na(last_swing_low) and close < last_swing_low and close[1] >= last_swing_low
+if bos_bull
+    trend_up := true
+if bos_bear
+    trend_up := false
+if bos_bull
+    label.new(bar_index, high, "BOS", style=label.style_label_down, color=color.blue, textcolor=color.white, size=size.small)
+if bos_bear
+    label.new(bar_index, low, "BOS", style=label.style_label_up, color=color.blue, textcolor=color.white, size=size.small)
+var float bull_ob_high = na
+var float bull_ob_low = na
+var float bear_ob_high = na
+var float bear_ob_low = na
+var box bull_ob_box = na
+var box bear_ob_box = na
+if bos_bull and close[1] < open[1]
+    bull_ob_high := high[1]
+    bull_ob_low := low[1]
+    if not na(bull_ob_box)
+        box.delete(bull_ob_box)
+    bull_ob_box := box.new(bar_index - 1, bull_ob_high, bar_index + 50, bull_ob_low, border_color=color.new(color.green, 20), bgcolor=color.new(color.green, 80))
+if bos_bear and close[1] > open[1]
+    bear_ob_high := high[1]
+    bear_ob_low := low[1]
+    if not na(bear_ob_box)
+        box.delete(bear_ob_box)
+    bear_ob_box := box.new(bar_index - 1, bear_ob_high, bar_index + 50, bear_ob_low, border_color=color.new(color.red, 20), bgcolor=color.new(color.red, 80))
+bull_fvg = low > high[2]
+bear_fvg = high < low[2]
+if bull_fvg
+    box.new(bar_index - 1, low, bar_index + 30, high[2], border_color=color.new(color.teal, 50), bgcolor=color.new(color.teal, 85), border_style=line.style_dotted)
+if bear_fvg
+    box.new(bar_index - 1, high, bar_index + 30, low[2], border_color=color.new(color.orange, 50), bgcolor=color.new(color.orange, 85), border_style=line.style_dotted)
+var float swing_range_high = na
+var float swing_range_low = na
+if swing_high
+    swing_range_high := high[i_swing_len]
+if swing_low
+    swing_range_low := low[i_swing_len]
+equilibrium = not na(swing_range_high) and not na(swing_range_low) ? (swing_range_high + swing_range_low) / 2 : na
+in_premium = not na(equilibrium) and close > equilibrium
+in_discount = not na(equilibrium) and close < equilibrium
+bgcolor(i_show_zones and in_premium ? color.new(color.red, 93) : na)
+bgcolor(i_show_zones and in_discount ? color.new(color.green, 93) : na)
+pdh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+pdl = request.security(syminfo.tickerid, "D", low[1], lookahead=barmerge.lookahead_on)
+plot(pdh, "PDH", color=color.new(color.gray, 40), style=plot.style_linebr)
+plot(pdl, "PDL", color=color.new(color.gray, 40), style=plot.style_linebr)
+bull_ob_entry = not na(bull_ob_high) and low <= bull_ob_high and low >= bull_ob_low and close > open
+bear_ob_entry = not na(bear_ob_high) and high >= bear_ob_low and high <= bear_ob_high and close < open
+alertcondition(bull_ob_entry, "Bullish OB Entry", "Bullish OB entry signal")
+alertcondition(bear_ob_entry, "Bearish OB Entry", "Bearish OB entry signal")
+alertcondition(bos_bull, "Bullish BOS", "Bullish BOS")
+alertcondition(bos_bear, "Bearish BOS", "Bearish BOS")
