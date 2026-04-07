@@ -1,0 +1,53 @@
+# SMC Trading Bot — Python Dependencies
+# All versions pinned for reproducible Railway deployments
+
+# Web framework
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+
+# Telegram bot
+python-telegram-bot[job-queue]==21.3
+
+# Database (async PostgreSQL)
+asyncpg==0.29.0
+sqlalchemy[asyncio]==2.0.30
+
+# HTTP clients
+httpx==0.27.0
+aiohttp==3.9.5
+
+# Anthropic API
+anthropic==0.28.0
+
+# Data validation
+pydantic==2.7.1
+pydantic-settings==2.3.1
+
+# Scheduling (daily summaries, weekly analysis)
+apscheduler==3.10.4
+
+# Date/time utilities
+pytz==2024.1
+python-dateutil==2.9.0.post0
+
+# Retry / backoff
+tenacity==8.3.0
+
+# JSON / serialization
+orjson==3.10.3
+
+# Math (BSM for GEX calculation — pure math, no indicators)
+scipy==1.13.0
+numpy==1.26.4
+
+# Logging
+structlog==24.2.0
+
+# Testing
+pytest==8.2.2
+pytest-asyncio==0.23.7
+pytest-mock==3.14.0
+httpx==0.27.0
+
+# Utilities
+python-multipart==0.0.9
