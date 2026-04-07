@@ -219,3 +219,6 @@ async def handle_onboard_callback(update,context,session):
             "📋 Use /help for all commands",
             parse_mode="MarkdownV2"
         )
+
+# Alias for backward compatibility
+handle_onboarding_callback = handle_onboard_callback
