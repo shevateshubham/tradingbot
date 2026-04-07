@@ -436,6 +436,7 @@ async def lifespan(app: FastAPI):
 
     _scheduler.start()
     asyncio.create_task(start_live_engine())
+    asyncio.create_task(start_evening_engine())
     logger.info("Scheduler started: price_tracker, india_summary, global_summary, weekly_analysis")
 
     yield  # ── Server running ───────────────────────────────────────
@@ -553,3 +554,26 @@ async def start_live_engine():
         await engine.run()
     except Exception as e:
         logger.error(f"Live engine startup error: {e}", exc_info=True)
+
+
+async def start_evening_engine():
+    """Start evening session engine for XAUUSD + Forex."""
+    try:
+        from mcp_server.tools.evening_session_engine import get_evening_engine
+        from mcp_server.tools.telegram_bot import send_signal_to_telegram
+        settings = get_settings()
+        engine = get_evening_engine()
+        async def on_signal(signal_data):
+            try:
+                await send_signal_to_telegram(
+                    _telegram_app.bot,
+                    settings.telegram_chat_id,
+                    signal_data
+                )
+            except Exception as e:
+                logger.error(f"Evening signal send error: {e}")
+        engine.set_signal_callback(on_signal)
+        logger.info("Starting evening session engine...")
+        await engine.run()
+    except Exception as e:
+        logger.error(f"Evening engine startup error: {e}", exc_info=True)
