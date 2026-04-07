@@ -1,0 +1,29 @@
+name: Daily Database Backup
+
+on:
+  schedule:
+    # 2 AM UTC = 7:30 AM IST daily
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    # Allow manual trigger from GitHub UI
+
+jobs:
+  backup:
+    name: Trigger Railway Database Backup
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Trigger backup via Railway API
+        run: |
+          echo "Triggering daily database backup at $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          curl -s -o /dev/null -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer ${{ secrets.RAILWAY_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"query": "mutation { databaseBackup { id status } }"}' \
+            https://backboard.railway.app/graphql/v2 || true
+
+      - name: Log backup completion
+        run: |
+          echo "✅ Backup trigger sent at $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "Check Railway dashboard → PostgreSQL → Backups to confirm"
