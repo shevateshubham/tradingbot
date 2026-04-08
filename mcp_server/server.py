@@ -383,7 +383,7 @@ async def lifespan(app: FastAPI):
     _telegram_app = build_telegram_app(settings.telegram_bot_token)
     await _telegram_app.initialize()
     await _telegram_app.start()
-    await _telegram_app.updater.start_polling(drop_pending_updates=True)
+    await _telegram_app.updater.start_polling(drop_pending_updates=True, read_timeout=30, write_timeout=30)
     logger.info("Telegram bot polling started")
 
     # ── Scheduler setup ───────────────────────────────────────────
