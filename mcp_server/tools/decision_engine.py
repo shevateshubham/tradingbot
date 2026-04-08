@@ -35,6 +35,14 @@ def score_decision(
     first_touch_ob: bool,
     ob_already_touched: bool,
     segment: str,
+    # Options-specific (indices / FNO only)
+    pcr_confirms: bool = False,
+    near_max_pain: bool = False,
+    gex_supports: bool = False,
+    options_conflict: bool = False,
+    # Session quality
+    is_lunch_hour: bool = False,
+    low_volume_session: bool = False,
 ) -> TradeDecision:
     """
     Score a potential SMC trade on 0–100 scale using config.py weights.
@@ -129,6 +137,32 @@ def score_decision(
     if volume_spike:
         score += SCORE_WEIGHTS["volume_ratio"]
         evidence.append(f"Volume spike +{SCORE_WEIGHTS['volume_ratio']}")
+
+    # ── Options / index-specific scoring ──────────────────────────────
+    if pcr_confirms:
+        score += SCORE_WEIGHTS["options_confirm"]
+        evidence.append(f"PCR confirms direction +{SCORE_WEIGHTS['options_confirm']}")
+
+    if near_max_pain:
+        score += SCORE_WEIGHTS["max_pain_proximity"]
+        evidence.append(f"Near max pain +{SCORE_WEIGHTS['max_pain_proximity']}")
+
+    if gex_supports:
+        score += 3
+        evidence.append("GEX supports direction +3")
+
+    if options_conflict:
+        score -= 5
+        evidence.append("Options conflict -5")
+
+    # ── Session quality penalties ──────────────────────────────────────
+    if is_lunch_hour:
+        score += SCORE_PENALTIES["lunch_hour"]
+        evidence.append(f"Lunch hour {SCORE_PENALTIES['lunch_hour']}")
+
+    if low_volume_session:
+        score -= 3
+        evidence.append("Low volume session -3")
 
     # ── HTF OB confluence (breaker block counts) ───────────────────────
     if htf_ob_confluence:
