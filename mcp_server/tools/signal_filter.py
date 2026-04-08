@@ -132,8 +132,9 @@ async def apply_filters(
             return FilterResult(False, reason, user)
 
     # ── 2. Segment not enabled ────────────────────────────────────
+    # Empty list means user hasn't configured preferences yet → allow all markets.
     enabled_markets = user.markets_enabled or []
-    if segment and segment not in enabled_markets:
+    if enabled_markets and segment and segment not in enabled_markets:
         reason = f"segment_not_enabled:{segment}"
         logger.debug(f"Discarding {instrument}: {reason}")
         await _log_discard(session, payload, reason, chat_id, score, grade)
