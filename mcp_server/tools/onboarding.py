@@ -141,10 +141,10 @@ async def send_step4(update,context,session,edit=True):
         target=update.message or update.callback_query.message
         await target.reply_text(text,reply_markup=kb)
 
-async def handle_onboarding_callback(update,context,session):
+async def handle_onboarding_callback(update,context,session,data=None):
     query=update.callback_query
     await query.answer()
-    data=query.data
+    if data is None: data=query.data
     chat_id=str(update.effective_chat.id)
     user=await get_or_create_user(session,chat_id)
 
