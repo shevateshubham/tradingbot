@@ -12,7 +12,7 @@ import pytz
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mcp_server.config import (
-    TIMEFRAME_MODES, QUALITY_FILTERS, MAX_CONSECUTIVE_LOSSES,
+    TIMEFRAME_MODES, QUALITY_FILTERS, MAX_CONSECUTIVE_LOSSES, get_settings,
 )
 from mcp_server.models.database import (
     get_or_create_user, get_signals_sent_today, count_open_trades,
@@ -172,7 +172,6 @@ async def apply_filters(
         return FilterResult(False, reason, user, send_limit_warning=send_warning)
 
     # ── 6. Max active open trades ─────────────────────────────────
-    from mcp_server.config import get_settings
     settings = get_settings()
     open_count = await count_open_trades(session, chat_id)
     if open_count >= settings.max_active_trades:

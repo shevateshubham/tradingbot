@@ -105,8 +105,9 @@ def detect_segment(instrument: str, exchange: str) -> Optional[str]:
         if "NIFTY" in ticker or "BANKNIFTY" in ticker:
             return "INDICES"
 
-        # F&O eligible stocks
-        base_symbol = re.sub(r"(FUT|CE|PE|\d{2}[A-Z]{3}\d{2}|\d{5}).*$", "", ticker)
+        # F&O eligible stocks — strip date/strike/suffix but NOT letters inside names
+        # e.g. RELIANCE23SEP1600CE → RELIANCE, not RELIAN (CE inside name)
+        base_symbol = re.sub(r"\d{2}[A-Z]{3}\d{0,4}(?:FUT|CE|PE)?.*$|(?<=\d)(?:FUT|CE|PE).*$|\d{5,}.*$", "", ticker)
         if base_symbol in FNO_SYMBOLS:
             return "INDIAN_FNO"
 
@@ -131,9 +132,10 @@ def get_base_symbol(instrument: str, exchange: str) -> str:
     if ":" in instrument:
         _, instrument = instrument.split(":", 1)
 
-    # Strip common futures/options suffixes
+    # Strip futures/options suffixes without touching letters inside stock names
+    # e.g. RELIANCE23SEP1600CE → RELIANCE, NIFTY23AUGFUT → NIFTY
     clean = re.sub(
-        r"(FUT|CE|PE|\d{2}[A-Z]{3}\d{2,4}|\d{4,6}(CE|PE)?|-\d+).*$",
+        r"\d{2}[A-Z]{3}\d{0,4}(?:FUT|CE|PE)?.*$|(?<=\d)(?:FUT|CE|PE).*$|\d{4,}(?:CE|PE)?.*$|-\d+.*$",
         "", instrument
     )
     return clean.strip() or instrument
