@@ -282,3 +282,4 @@ QF_LABELS = {
     "ALL_SCORED": "All Scored Setups up to 8/day",
 }
 # redeploy
+# force redeploy v2
