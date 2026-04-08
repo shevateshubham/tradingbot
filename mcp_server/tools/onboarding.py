@@ -8,11 +8,11 @@ from mcp_server.config import QUALITY_FILTERS
 logger = logging.getLogger(__name__)
 
 MARKETS = [
-    {"id":"INDICES",        "label":"🏦 Indices (Nifty/BN)",  "hours":"9:15 AM - 3:30 PM IST"},
-    {"id":"INDIAN_FNO",     "label":"📊 Indian F&O",           "hours":"9:15 AM - 3:30 PM IST"},
-    {"id":"COMMODITY",      "label":"🥇 XAUUSD Gold",          "hours":"3:30 PM - 12:00 AM IST"},
-    {"id":"CURRENCY_FOREX", "label":"💱 Forex Majors",         "hours":"3:30 PM - 12:00 AM IST"},
-    {"id":"INDIAN_STOCKS",  "label":"🇮🇳 Indian Stocks",       "hours":"9:15 AM - 3:30 PM IST"},
+    {"id":"INDICES",        "label":"🏦 Indices (Nifty/BN)",  "hours":"9:15 AM to 3:30 PM IST"},
+    {"id":"INDIAN_FNO",     "label":"📊 Indian F&O",           "hours":"9:15 AM to 3:30 PM IST"},
+    {"id":"COMMODITY",      "label":"🥇 XAUUSD Gold",          "hours":"3:30 PM to 12:00 AM IST"},
+    {"id":"CURRENCY_FOREX", "label":"💱 Forex Majors",         "hours":"3:30 PM to 12:00 AM IST"},
+    {"id":"INDIAN_STOCKS",  "label":"🇮🇳 Indian Stocks",       "hours":"9:15 AM to 3:30 PM IST"},
     {"id":"CRYPTO",         "label":"₿ Crypto",                "hours":"24/7"},
     {"id":"GLOBAL_INDICES", "label":"🌍 Global Indices",       "hours":"Evening"},
 ]
@@ -58,9 +58,9 @@ async def send_step1(update,context,session,edit=False):
         "• Wyckoff Method • Volume Analysis\n"
         "• Liquidity Engineering • Trap Detection\n\n"
         "Market Schedule:\n"
-        "🏦 Indices + F&O: 9:15 AM - 3:30 PM IST\n"
-        "🥇 Gold + Forex: 3:30 PM - 12:00 AM IST\n"
-        "😴 Sleep: 12:00 AM - 9:15 AM IST\n\n"
+        "🏦 Indices and F&O: 9:15 AM to 3:30 PM IST\n"
+        "🥇 Gold and Forex: 3:30 PM to 12:00 AM IST\n"
+        "😴 Sleep: 12:00 AM to 9:15 AM IST\n\n"
         "Select your markets below:"
     )
     kb=build_market_keyboard(selected)
@@ -127,8 +127,8 @@ async def send_step4(update,context,session,edit=True):
         f"Quality   : {QF_LABELS.get(qf,qf)}\n"
         f"Max/Day   : {max_sigs} signals\n"
         f"Mode      : {mode}\n\n"
-        f"🏦 Indian session: 9:15 AM - 3:30 PM IST\n"
-        f"🥇 Evening session: 3:30 PM - 12:00 AM IST\n\n"
+        f"🏦 Indian session: 9:15 AM to 3:30 PM IST\n"
+        f"🥇 Evening session: 3:30 PM to 12:00 AM IST\n\n"
         f"I will send signals automatically when institutional setups are detected!"
     )
     kb=InlineKeyboardMarkup([[
