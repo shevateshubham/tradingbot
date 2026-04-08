@@ -207,6 +207,72 @@ async def _preload_historical(self):
     def stop(self): self._running=False
     def get_prices(self): return dict(self._prices)
 
+
+    async def _preload_historical(self):
+        import httpx
+        from datetime import date, timedelta
+        logger.info('Preloading historical data...')
+        NSE_HIST='https://www.nseindia.com/api/historical/indicesHistory'
+        for inst in INDICES:
+            sym=inst['symbol']
+            try:
+                cookies=await self._f._refresh()
+                end=date.today();start=end-timedelta(days=60)
+                params={'indexType':sym,'from':start.strftime('%d-%m-%Y'),'to':end.strftime('%d-%m-%Y')}
+                async with httpx.AsyncClient(timeout=15.0,cookies=cookies,headers=self._f._h()) as c:
+                    r=await c.get(NSE_HIST,params=params)
+                    if r.status_code==200:
+                        rows=r.json().get('data',{}).get('indexCloseOnlineRecords',[])
+                        if not self._hist.get(sym): self._hist[sym]={'opens':[],'highs':[],'lows':[],'closes':[],'volumes':[]}
+                        for row in rows:
+                            try:
+                                o=float(row.get('EOD_OPEN_INDEX_VAL',0)or 0);h=float(row.get('EOD_HIGH_INDEX_VAL',0)or 0)
+                                l=float(row.get('EOD_LOW_INDEX_VAL',0)or 0);cl=float(row.get('EOD_CLOSING_INDEX_VAL',0)or 0)
+                                if cl>0:
+                                    self._hist[sym]['opens'].append(o);self._hist[sym]['highs'].append(h)
+                                    self._hist[sym]['lows'].append(l);self._hist[sym]['closes'].append(cl)
+                                    self._hist[sym]['volumes'].append(1000.0)
+                            except: pass
+                        logger.info(f'Preloaded {sym}: {len(self._hist[sym]["closes"])} candles')
+            except Exception as e: logger.warning(f'Preload failed {sym}: {e}')
+            await asyncio.sleep(0.5)
+
+    async def _tick(self):
+        prices=await self._f.fetch_indices()
+        if not prices: return
+        now=datetime.now(IST)
+        for inst in INDICES:
+            sym=inst['symbol'];data=prices.get(sym)
+            if not data or not data.get('price'): continue
+            p=data['price'];vol=data.get('volume',1000);self._prices[sym]=p
+            for tf in TIMEFRAMES:
+                closed=self._b[sym][tf].update(p,now,vol)
+                if closed and self._b[sym][tf].count>=30:
+                    await self._process(sym,tf,inst)
+
+    async def run(self):
+        self._running=True
+        logger.info('Live engine started')
+        await self._preload_historical()
+        while self._running:
+            try:
+                if self.is_open():
+                    await self._tick()
+                    await asyncio.sleep(60)
+                else:
+                    mins=self.mins_to_open()
+                    sl=1800 if mins>60 else 60
+                    logger.info(f'Market closed. Opens in {mins}min.')
+                    await asyncio.sleep(sl)
+            except asyncio.CancelledError: break
+            except Exception as e:
+                logger.error(f'Engine: {e}',exc_info=True)
+                await asyncio.sleep(30)
+        self._running=False
+
+    def stop(self): self._running=False
+    def get_prices(self): return dict(self._prices)
+
 _engine=None
 def get_live_engine():
     global _engine
