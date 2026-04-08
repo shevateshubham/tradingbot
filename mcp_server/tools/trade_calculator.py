@@ -264,8 +264,9 @@ def calculate_position(
         )
 
     # ── Step 2: Check RR ratio ────────────────────────────────────
-    tp1_distance = abs(tp1 - entry)
-    rr_ratio = tp1_distance / sl_points if sl_points > 0 else 0
+    # Use TP2 (2:1 target) for RR calculation — TP1 is always 1:1 by design.
+    tp2_distance = abs(tp2 - entry)
+    rr_ratio = tp2_distance / sl_points if sl_points > 0 else 0
 
     if rr_ratio < settings.min_rr_ratio:
         logger.info(f"Hard discard: RR {rr_ratio:.2f} < min {settings.min_rr_ratio}")
