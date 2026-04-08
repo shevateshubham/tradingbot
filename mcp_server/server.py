@@ -435,8 +435,8 @@ async def lifespan(app: FastAPI):
     )
 
     _scheduler.start()
-    asyncio.create_task(start_live_engine())
-    asyncio.create_task(start_evening_engine())
+    asyncio.get_event_loop().call_later(10, lambda: asyncio.create_task(start_live_engine()))
+    asyncio.get_event_loop().call_later(15, lambda: asyncio.create_task(start_evening_engine()))
     logger.info("Scheduler started: price_tracker, india_summary, global_summary, weekly_analysis")
 
     yield  # ── Server running ───────────────────────────────────────
