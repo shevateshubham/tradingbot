@@ -131,6 +131,54 @@ class LiveDataEngine:
             logger.info(f"SIGNAL: NSE:{sym} {sd} score={dec.score} grade={dec.grade} tf={tf}m entry={entry:.2f}")
             if self._cb: await self._cb(sig)
         except Exception as e: logger.error(f"Process {sym} {tf}m: {e}",exc_info=True)
+
+async def _preload_historical(self):
+    import httpx
+    logger.info('Preloading historical candle data...')
+    BINANCE_HIST = {
+        'NIFTY':      'NIFTYUSDT',
+        'BANKNIFTY':  None,
+        'FINNIFTY':   None,
+        'MIDCPNIFTY': None,
+    }
+    NSE_HIST_URL = 'https://www.nseindia.com/api/historical/indicesHistory'
+    for inst in INDICES:
+        sym = inst['symbol']
+        try:
+            cookies = await self._f._refresh()
+            hdrs = self._f._h()
+            from datetime import date, timedelta
+            end = date.today()
+            start = end - timedelta(days=60)
+            params = {
+                'indexType': sym,
+                'from': start.strftime('%d-%m-%Y'),
+                'to': end.strftime('%d-%m-%Y'),
+            }
+            async with httpx.AsyncClient(timeout=15.0, cookies=cookies, headers=hdrs) as c:
+                r = await c.get(NSE_HIST_URL, params=params)
+                if r.status_code == 200:
+                    rows = r.json().get('data', {}).get('indexCloseOnlineRecords', [])
+                    if rows:
+                        for row in rows:
+                            try:
+                                o = float(row.get('EOD_OPEN_INDEX_VAL', 0) or 0)
+                                h = float(row.get('EOD_HIGH_INDEX_VAL', 0) or 0)
+                                l = float(row.get('EOD_LOW_INDEX_VAL', 0) or 0)
+                                cl = float(row.get('EOD_CLOSING_INDEX_VAL', 0) or 0)
+                                if cl > 0:
+                                    self._hist[sym] = self._hist.get(sym, {'opens':[],'highs':[],'lows':[],'closes':[],'volumes':[]})
+                                    self._hist[sym]['opens'].append(o)
+                                    self._hist[sym]['highs'].append(h)
+                                    self._hist[sym]['lows'].append(l)
+                                    self._hist[sym]['closes'].append(cl)
+                                    self._hist[sym]['volumes'].append(1000.0)
+                            except: pass
+                        logger.info(f'Preloaded {sym}: {len(self._hist.get(sym, {}).get("closes", []))} candles')
+        except Exception as e:
+            logger.warning(f'Preload failed for {sym}: {e}')
+        await asyncio.sleep(0.5)
+
     async def _tick(self):
         prices=await self._f.fetch_indices()
         if not prices: return
@@ -145,6 +193,7 @@ class LiveDataEngine:
                     await self._process(sym,tf,inst)
     async def run(self):
         self._running=True;logger.info("Live engine started")
+        await self._preload_historical()
         while self._running:
             try:
                 if self.is_open(): await self._tick();await asyncio.sleep(60)
