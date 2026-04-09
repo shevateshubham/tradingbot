@@ -72,7 +72,7 @@ class NSEFetcher:
             async with httpx.AsyncClient(timeout=15.0,cookies=ck,headers=self._h()) as c:
                 r=await c.get(NSE_OC_INDEX,params={"symbol":sym})
                 if r.status_code==200:return r.json()
-        except:pass
+        except Exception as e: logger.warning(f"OC fetch {sym}: {e}")
         return None
 
 class LiveDataEngine:
@@ -123,8 +123,8 @@ class LiveDataEngine:
                                     self._hist[sym]["opens"].append(o);self._hist[sym]["highs"].append(h)
                                     self._hist[sym]["lows"].append(l);self._hist[sym]["closes"].append(cl)
                                     self._hist[sym]["volumes"].append(1000.0)
-                            except:pass
-                        logger.info(f"Preloaded {sym}: {len(self._hist.get(sym,{}).get(chr(99)+chr(108)+chr(111)+chr(115)+chr(101)+chr(115),[]))} candles")
+                            except Exception: pass
+                        logger.info(f"Preloaded {sym}: {len(self._hist.get(sym,{}).get('closes',[]))} candles")
             except Exception as e:logger.warning(f"Preload failed {sym}: {e}")
             await asyncio.sleep(0.5)
 
@@ -137,12 +137,11 @@ class LiveDataEngine:
             m={k:(hist.get(k,[])+ohlcv.get(k,[]))[-200:] for k in ("opens","highs","lows","closes","volumes")}
             if len(m["closes"])<30:return
             o=m["opens"];h=m["highs"];l=m["lows"];c=m["closes"];v=m["volumes"];cur=c[-1]
-            def htf(cl):
-                if len(cl)<20:return "NEUTRAL"
-                mid=len(cl)//2;hh=max(cl[mid:])>max(cl[:mid]);hl=min(cl[mid:])>min(cl[:mid])
-                lh=max(cl[mid:])<max(cl[:mid]);ll=min(cl[mid:])<min(cl[:mid])
-                return "BULLISH" if hh and hl else "BEARISH" if lh and ll else "NEUTRAL"
-            weekly=htf(c[-100:] if len(c)>=100 else c);daily=htf(c[-50:] if len(c)>=50 else c);h4=htf(c[-20:] if len(c)>=20 else c)
+            from mcp_server.tools.institutional_detector import detect_htf_structure
+            def _slice(arr,n):return arr[-n:] if len(arr)>=n else arr
+            weekly=detect_htf_structure(_slice(c,100),_slice(h,100),_slice(l,100))
+            daily=detect_htf_structure(_slice(c,50),_slice(h,50),_slice(l,50))
+            h4=detect_htf_structure(_slice(c,20),_slice(h,20),_slice(l,20))
             inst=analyze_institutional_activity(o,h,l,c,v,min(l[-20:]),max(h[-20:]),weekly)
             if inst.institutional_bias=="NEUTRAL" and inst.total_score<10:return
             sd="LONG" if inst.institutional_bias=="BULLISH" else "SHORT"
@@ -167,7 +166,7 @@ class LiveDataEngine:
                 try:
                     dte=max(1,(3-date.today().weekday())%7 or 7)
                     os=select_strategy(underlying_price=cur,max_pain=mp or cur,pcr=pcr or 1.0,ce_walls=od.get("ce_walls",[]),pe_walls=od.get("pe_walls",[]),days_to_expiry=dte,instrument=sym,directional_bias=inst.institutional_bias)
-                except:pass
+                except Exception as e: logger.debug(f"Options strategy {sym}: {e}")
             sp=cur*0.004;entry=cur;sl=cur-sp if sd=="LONG" else cur+sp
             tp1=cur+sp if sd=="LONG" else cur-sp;tp2=cur+sp*2 if sd=="LONG" else cur-sp*2;tp3=cur+sp*3 if sd=="LONG" else cur-sp*3
             sl_pts=abs(entry-sl);lv=inst_info["lot_size"]

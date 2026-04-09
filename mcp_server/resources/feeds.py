@@ -217,7 +217,8 @@ async def fetch_current_price(instrument: str, segment: str) -> Optional[float]:
                 symbol = symbol + "USDT"
             ticker = await fetch_binance_ticker_24h(symbol)
             if ticker:
-                return float(ticker.get("lastPrice", 0))
+                val = float(ticker.get("lastPrice", 0))
+                return val if val > 0 else None
 
         elif segment in ("INDICES", "INDIAN_FNO", "INDIAN_STOCKS"):
             # Use NSE API for current price
@@ -248,7 +249,8 @@ async def _fetch_nse_price(instrument: str) -> Optional[float]:
                 data = resp.json()
                 # NSE returns priceInfo.lastPrice
                 price_info = data.get("priceInfo", {})
-                return float(price_info.get("lastPrice", 0)) or None
+                val = float(price_info.get("lastPrice", 0))
+                return val if val > 0 else None
     except Exception as e:
         logger.debug(f"NSE price fetch failed for {instrument}: {e}")
     return None

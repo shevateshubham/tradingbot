@@ -3,7 +3,7 @@ from datetime import datetime, date
 from typing import Optional, List, Dict, Any
 import httpx, pytz
 from mcp_server.config import get_settings, FNO_SYMBOLS, NSE_BASE_URL, BINANCE_BASE_URL
-from mcp_server.tools.institutional_detector import analyze_institutional_activity
+from mcp_server.tools.institutional_detector import analyze_institutional_activity, detect_htf_structure
 from mcp_server.tools.decision_engine import score_decision
 from mcp_server.tools.options_analysis import analyze_option_chain, is_near_max_pain
 from mcp_server.resources.feeds import fetch_nse_option_chain, fetch_binance_klines, _get_nse_cookies
@@ -14,13 +14,6 @@ IST = pytz.timezone("Asia/Kolkata")
 SCAN_INDICES = [("NIFTY","NSE"),("BANKNIFTY","NSE"),("FINNIFTY","NSE")]
 SCAN_FNO = [("RELIANCE","NSE"),("TCS","NSE"),("HDFCBANK","NSE"),("INFY","NSE"),("ICICIBANK","NSE"),("KOTAKBANK","NSE"),("AXISBANK","NSE"),("SBIN","NSE"),("BAJFINANCE","NSE"),("WIPRO","NSE")]
 SCAN_CRYPTO = [("BTCUSDT","BINANCE"),("ETHUSDT","BINANCE"),("BNBUSDT","BINANCE"),("SOLUSDT","BINANCE"),("XRPUSDT","BINANCE")]
-
-def detect_htf_structure(closes):
-    if len(closes)<20: return "NEUTRAL"
-    mid=len(closes)//2
-    hh=max(closes[mid:])>max(closes[:mid]); hl=min(closes[mid:])>min(closes[:mid])
-    lh=max(closes[mid:])<max(closes[:mid]); ll=min(closes[mid:])<min(closes[:mid])
-    return "BULLISH" if hh and hl else "BEARISH" if lh and ll else "NEUTRAL"
 
 async def fetch_binance_ohlcv(symbol, interval="15m", limit=100):
     raw=await fetch_binance_klines(symbol, interval, limit)
@@ -48,7 +41,10 @@ class MarketScanner:
         if not ohlcv or len(ohlcv.get("closes",[]))<30: return None
         o=ohlcv["opens"]; h=ohlcv["highs"]; l=ohlcv["lows"]; c=ohlcv["closes"]; v=ohlcv["volumes"]
         cur=c[-1]
-        weekly=detect_htf_structure(c); daily=detect_htf_structure(c[-60:] if len(c)>=60 else c); h4=detect_htf_structure(c[-30:] if len(c)>=30 else c)
+        def _sl(arr,n):return arr[-n:] if len(arr)>=n else arr
+        weekly=detect_htf_structure(_sl(c,100),_sl(h,100),_sl(l,100))
+        daily=detect_htf_structure(_sl(c,60),_sl(h,60),_sl(l,60))
+        h4=detect_htf_structure(_sl(c,30),_sl(h,30),_sl(l,30))
         support=min(l[-20:]); resistance=max(h[-20:])
         inst=analyze_institutional_activity(o,h,l,c,v,support,resistance,weekly)
         if inst.institutional_bias=="NEUTRAL" and inst.total_score<10: return None
@@ -73,7 +69,7 @@ class MarketScanner:
             try:
                 raw_o=await fetch_nse_option_chain(symbol,is_index=True)
                 if raw_o: options_data=analyze_option_chain(raw_o,cur)
-            except: pass
+            except Exception as e: logger.debug(f"Options chain {symbol}: {e}")
         pcr_v=options_data.get("pcr",1.0); mp=options_data.get("max_pain")
         pcr_c=(sig_dir=="LONG" and options_data.get("options_direction")=="BULLISH") or (sig_dir=="SHORT" and options_data.get("options_direction")=="BEARISH")
         near_mp=mp and is_near_max_pain(cur,mp)
@@ -87,7 +83,7 @@ class MarketScanner:
             try:
                 dte=max(1,(3-date.today().weekday())%7 or 7)
                 options_signal=select_strategy(underlying_price=cur,max_pain=mp or cur,pcr=pcr_v or 1.0,ce_walls=options_data.get("ce_walls",[]),pe_walls=options_data.get("pe_walls",[]),days_to_expiry=dte,instrument=symbol,directional_bias=direction)
-            except: pass
+            except Exception as e: logger.debug(f"Options strategy {symbol}: {e}")
         spread=cur*0.005
         entry=cur; sl=cur-spread if sig_dir=="LONG" else cur+spread
         tp1=cur+spread if sig_dir=="LONG" else cur-spread
