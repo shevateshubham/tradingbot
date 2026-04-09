@@ -120,9 +120,9 @@ ENTRY TRIGGERS:
   Vol Spike: {volume_spike}
 
 Evaluate strictly. Signal only if:
-1. HTF structure and entry direction agree
-2. A fresh or breaker OB (or OB+FVG) is present
-3. At least one entry trigger is active
+1. At least 2 of (Weekly / Daily / H4) agree with entry direction (NEUTRAL counts as non-conflicting)
+2. Institutional evidence present: OB (fresh or mitigated), OB+FVG confluence, Breaker Block, OR institutional score ≥ 20
+3. At least one trigger active: Killzone | LTF CHOCH | Volume Spike | Liquidity Event (any) | Institutional Score ≥ 30
 
 Respond ONLY with valid JSON, no markdown fences:
 {{"send":true/false,"direction":"LONG or SHORT","grade":"A+ or A or B or C","confidence":50-100,"narrative":"2 sentences max","key_reasons":["reason1","reason2"],"risk_factors":["risk1"]}}"""

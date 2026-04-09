@@ -166,18 +166,28 @@ def _detect_order_block(
 
     if direction == "BULLISH":
         for i in range(n - 5, max(0, n - 30), -1):
-            if closes[i] < opens[i]:                          # bearish candle
-                if i + 2 < n and closes[i + 2] > highs[i]:   # strong up move after
+            if closes[i] < opens[i]:                          # bearish candle (OB candidate)
+                # Impulse: any of the next 5 bars closes above the OB high
+                impulse = any(
+                    (i + j) < n and closes[i + j] > highs[i]
+                    for j in range(1, 6)
+                )
+                if impulse:
                     ob_high = highs[i]
-                    ob_low = lows[i]
+                    ob_low  = lows[i]
                     already_touched = ob_low <= cur <= ob_high
                     return True, already_touched
     else:
         for i in range(n - 5, max(0, n - 30), -1):
-            if closes[i] > opens[i]:                          # bullish candle
-                if i + 2 < n and closes[i + 2] < lows[i]:    # strong down move after
+            if closes[i] > opens[i]:                          # bullish candle (OB candidate)
+                # Impulse: any of the next 5 bars closes below the OB low
+                impulse = any(
+                    (i + j) < n and closes[i + j] < lows[i]
+                    for j in range(1, 6)
+                )
+                if impulse:
                     ob_high = highs[i]
-                    ob_low = lows[i]
+                    ob_low  = lows[i]
                     already_touched = ob_low <= cur <= ob_high
                     return True, already_touched
 
@@ -196,11 +206,13 @@ def _detect_breaker_block(highs: list, lows: list, closes: list, direction: str)
 
     if direction == "BULLISH":
         recent_low = min(lows[-10:-3])
-        if lows[-3] < recent_low and closes[-1] > recent_low:
+        # Any of the last 3 bars swept the prior swing low and recovered
+        if min(lows[-3:]) < recent_low and closes[-1] > recent_low:
             return True
     else:
         recent_high = max(highs[-10:-3])
-        if highs[-3] > recent_high and closes[-1] < recent_high:
+        # Any of the last 3 bars swept the prior swing high and reversed
+        if max(highs[-3:]) > recent_high and closes[-1] < recent_high:
             return True
 
     return False

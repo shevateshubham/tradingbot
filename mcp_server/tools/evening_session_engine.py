@@ -118,7 +118,9 @@ class EveningSessionEngine:
             weekly=detect_htf_structure(_slice(c,100),_slice(h,100),_slice(l,100))
             daily=detect_htf_structure(_slice(c,50),_slice(h,50),_slice(l,50))
             h4=detect_htf_structure(_slice(c,20),_slice(h,20),_slice(l,20))
-            inst=analyze_institutional_activity(o,h,l,c,v,min(l[-20:]),max(h[-20:]),weekly)
+            _sl=min(l[-25:-4]) if len(l)>=25 else (min(l[:-3]) if len(l)>3 else min(l))
+            _sh=max(h[-25:-4]) if len(h)>=25 else (max(h[:-3]) if len(h)>3 else max(h))
+            inst=analyze_institutional_activity(o,h,l,c,v,_sl,_sh,weekly)
             if inst.institutional_bias=="NEUTRAL" and inst.total_score<5: return
             sd="LONG" if inst.institutional_bias=="BULLISH" else "SHORT"
             trap=inst.liquidity_event.value in ("SSL_SWEPT","BSL_SWEPT","IND_BULL","IND_BEAR","TURTLE_BULL","TURTLE_BEAR")
