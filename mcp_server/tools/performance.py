@@ -516,6 +516,7 @@ async def run_weekly_analysis(
     )
     session.add(log)
     await session.flush()
+    await session.commit()
 
     # ── Step 7: Send Telegram report ──────────────────────────────
     report = (
@@ -576,6 +577,7 @@ async def approve_improvement_pr(
         if record:
             record.approved_at = datetime.utcnow()
             await session.flush()
+            await session.commit()
 
         await update.message.reply_text(
             f"✅ PR #{pr_number} merged and deployed.\n"
@@ -610,6 +612,7 @@ async def reject_improvement_pr(
             record.reverted = True
             record.revert_reason = "rejected_by_user"
             await session.flush()
+            await session.commit()
 
         await update.message.reply_text(
             f"❌ PR #{pr_number} rejected and closed.\n"

@@ -72,7 +72,7 @@ class NSEFetcher:
             async with httpx.AsyncClient(timeout=15.0,cookies=ck,headers=self._h()) as c:
                 r=await c.get(NSE_OC_INDEX,params={"symbol":sym})
                 if r.status_code==200:return r.json()
-        except:pass
+        except Exception as e: logger.warning(f"OC fetch {sym}: {e}")
         return None
 
 class LiveDataEngine:
@@ -123,8 +123,8 @@ class LiveDataEngine:
                                     self._hist[sym]["opens"].append(o);self._hist[sym]["highs"].append(h)
                                     self._hist[sym]["lows"].append(l);self._hist[sym]["closes"].append(cl)
                                     self._hist[sym]["volumes"].append(1000.0)
-                            except:pass
-                        logger.info(f"Preloaded {sym}: {len(self._hist.get(sym,{}).get(chr(99)+chr(108)+chr(111)+chr(115)+chr(101)+chr(115),[]))} candles")
+                            except Exception: pass
+                        logger.info(f"Preloaded {sym}: {len(self._hist.get(sym,{}).get('closes',[]))} candles")
             except Exception as e:logger.warning(f"Preload failed {sym}: {e}")
             await asyncio.sleep(0.5)
 
@@ -167,7 +167,7 @@ class LiveDataEngine:
                 try:
                     dte=max(1,(3-date.today().weekday())%7 or 7)
                     os=select_strategy(underlying_price=cur,max_pain=mp or cur,pcr=pcr or 1.0,ce_walls=od.get("ce_walls",[]),pe_walls=od.get("pe_walls",[]),days_to_expiry=dte,instrument=sym,directional_bias=inst.institutional_bias)
-                except:pass
+                except Exception as e: logger.debug(f"Options strategy {sym}: {e}")
             sp=cur*0.004;entry=cur;sl=cur-sp if sd=="LONG" else cur+sp
             tp1=cur+sp if sd=="LONG" else cur-sp;tp2=cur+sp*2 if sd=="LONG" else cur-sp*2;tp3=cur+sp*3 if sd=="LONG" else cur-sp*3
             sl_pts=abs(entry-sl);lv=inst_info["lot_size"]

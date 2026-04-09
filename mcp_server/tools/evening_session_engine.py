@@ -66,7 +66,7 @@ class ForexFetcher:
                 if r.status_code==200:
                     p=r.json().get("rates",{}).get(quote)
                     if p: return {"price":float(p),"open":float(p),"high":float(p)*1.001,"low":float(p)*0.999,"close":float(p),"volume":1000.0}
-        except: pass
+        except Exception as e: logger.debug(f"er-api {sym}: {e}")
         try:
             async with httpx.AsyncClient(timeout=8.0) as c:
                 r=await c.get(f"https://api.frankfurter.app/latest?from={base}&to={quote}")

@@ -281,5 +281,3 @@ QF_LABELS = {
     "A_AND_APLUS": "A and A+ Setups max 5/day",
     "ALL_SCORED": "All Scored Setups up to 8/day",
 }
-# redeploy
-# force redeploy v2

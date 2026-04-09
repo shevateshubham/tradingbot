@@ -35,7 +35,7 @@ def _premium(S, K, dte, iv=0.15, call=True):
         nc=lambda x:0.5*(1+math.erf(x/math.sqrt(2)))
         p=(S*nc(d1)-K*math.exp(-r*T)*nc(d2)) if call else (K*math.exp(-r*T)*nc(-d2)-S*nc(-d1))
         return max(0.0,round(p,2))
-    except: return round(S*iv*math.sqrt(T)*0.4,2)
+    except Exception as e: logger.debug(f"Black-Scholes failed S={S} K={K}: {e}"); return round(S*iv*math.sqrt(T)*0.4,2)
 
 def select_strategy(underlying_price, max_pain, pcr, ce_walls, pe_walls, days_to_expiry, instrument, directional_bias="NEUTRAL", iv_estimate=0.15, iv_52w_high=0.35, iv_52w_low=0.10):
     iv_rank=((iv_estimate-iv_52w_low)/(iv_52w_high-iv_52w_low)*100) if iv_52w_high!=iv_52w_low else 50

@@ -73,7 +73,7 @@ class MarketScanner:
             try:
                 raw_o=await fetch_nse_option_chain(symbol,is_index=True)
                 if raw_o: options_data=analyze_option_chain(raw_o,cur)
-            except: pass
+            except Exception as e: logger.debug(f"Options chain {symbol}: {e}")
         pcr_v=options_data.get("pcr",1.0); mp=options_data.get("max_pain")
         pcr_c=(sig_dir=="LONG" and options_data.get("options_direction")=="BULLISH") or (sig_dir=="SHORT" and options_data.get("options_direction")=="BEARISH")
         near_mp=mp and is_near_max_pain(cur,mp)
@@ -87,7 +87,7 @@ class MarketScanner:
             try:
                 dte=max(1,(3-date.today().weekday())%7 or 7)
                 options_signal=select_strategy(underlying_price=cur,max_pain=mp or cur,pcr=pcr_v or 1.0,ce_walls=options_data.get("ce_walls",[]),pe_walls=options_data.get("pe_walls",[]),days_to_expiry=dte,instrument=symbol,directional_bias=direction)
-            except: pass
+            except Exception as e: logger.debug(f"Options strategy {symbol}: {e}")
         spread=cur*0.005
         entry=cur; sl=cur-spread if sig_dir=="LONG" else cur+spread
         tp1=cur+spread if sig_dir=="LONG" else cur-spread

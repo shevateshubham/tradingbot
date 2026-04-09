@@ -11,7 +11,7 @@ import asyncpg
 from sqlalchemy import (
     Column, Integer, Float, Boolean, Text, String,
     DateTime, Date, ForeignKey, JSON, func, Index,
-    UniqueConstraint,
+    UniqueConstraint, select, update, insert,
 )
 from sqlalchemy.ext.asyncio import (
     AsyncSession, AsyncEngine, create_async_engine, async_sessionmaker,
@@ -259,7 +259,6 @@ async def close_db() -> None:
 
 async def get_user_by_chat_id(session: AsyncSession, chat_id: str) -> Optional[UserPreferences]:
     """Fetch user preferences by Telegram chat ID."""
-    from sqlalchemy import select
     result = await session.execute(
         select(UserPreferences).where(UserPreferences.chat_id == str(chat_id))
     )
@@ -288,7 +287,6 @@ async def get_or_create_user(session: AsyncSession, chat_id: str) -> UserPrefere
 
 async def get_signals_sent_today(session: AsyncSession, user_id: int) -> int:
     """Return number of signals sent today for this user."""
-    from sqlalchemy import select
     today = date.today()
     result = await session.execute(
         select(UserSignalCount.signals_sent).where(
@@ -302,7 +300,6 @@ async def get_signals_sent_today(session: AsyncSession, user_id: int) -> int:
 
 async def increment_signals_today(session: AsyncSession, user_id: int) -> int:
     """Increment today's signal count and return new total."""
-    from sqlalchemy import select, update, insert
     today = date.today()
 
     result = await session.execute(
@@ -326,7 +323,7 @@ async def increment_signals_today(session: AsyncSession, user_id: int) -> int:
 
 async def count_open_trades(session: AsyncSession, chat_id: str) -> int:
     """Count currently open (not closed) signal positions for this user."""
-    from sqlalchemy import select, func as sqlfunc
+    from sqlalchemy import func as sqlfunc
     result = await session.execute(
         select(sqlfunc.count(Signal.id)).where(
             Signal.chat_id == str(chat_id),
@@ -338,7 +335,6 @@ async def count_open_trades(session: AsyncSession, chat_id: str) -> int:
 
 async def get_recent_losses(session: AsyncSession, chat_id: str, hours: int = 24) -> int:
     """Count consecutive losses in the last N hours."""
-    from sqlalchemy import select
     from datetime import timedelta
     cutoff = datetime.utcnow() - timedelta(hours=hours)
 
@@ -363,7 +359,6 @@ async def get_recent_losses(session: AsyncSession, chat_id: str, hours: int = 24
 
 async def get_open_signals(session: AsyncSession, chat_id: str) -> List[Signal]:
     """Fetch all open signals for this user."""
-    from sqlalchemy import select
     result = await session.execute(
         select(Signal).where(
             Signal.chat_id == str(chat_id),
@@ -377,7 +372,6 @@ async def get_performance_stats(
     session: AsyncSession, chat_id: str, days: int = 30
 ) -> dict:
     """Calculate win rate, RR, P&L for the last N days."""
-    from sqlalchemy import select
     from datetime import timedelta
 
     cutoff = datetime.utcnow() - timedelta(days=days)
