@@ -368,6 +368,23 @@ async def get_open_signals(session: AsyncSession, chat_id: str) -> List[Signal]:
     return list(result.scalars().all())
 
 
+async def get_open_base_symbols(session: AsyncSession, chat_id: str) -> List[str]:
+    """Return base symbols for all currently open signals (e.g. 'NIFTY' from 'NSE:NIFTY')."""
+    result = await session.execute(
+        select(Signal.instrument).where(
+            Signal.chat_id == str(chat_id),
+            Signal.status == "open",
+        )
+    )
+    symbols = []
+    for (instrument,) in result.all():
+        if instrument:
+            # instrument format: "NSE:NIFTY" or just "NIFTY"
+            sym = instrument.split(":")[-1] if ":" in instrument else instrument
+            symbols.append(sym.upper())
+    return symbols
+
+
 async def get_performance_stats(
     session: AsyncSession, chat_id: str, days: int = 30
 ) -> dict:

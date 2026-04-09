@@ -58,6 +58,7 @@ async def test_filter_passes_all_checks():
     with patch("mcp_server.tools.signal_filter.get_or_create_user", return_value=user), \
          patch("mcp_server.tools.signal_filter.get_signals_sent_today", return_value=0), \
          patch("mcp_server.tools.signal_filter.count_open_trades", return_value=0), \
+         patch("mcp_server.tools.signal_filter.get_open_base_symbols", return_value=[]), \
          patch("mcp_server.tools.signal_filter.get_recent_losses", return_value=0):
 
         result = await apply_filters(mock_session, "123456789", _payload(), score=85, grade="A")
@@ -187,6 +188,7 @@ async def test_filter_triggers_consecutive_loss_protection():
     with patch("mcp_server.tools.signal_filter.get_or_create_user", return_value=user), \
          patch("mcp_server.tools.signal_filter.get_signals_sent_today", return_value=0), \
          patch("mcp_server.tools.signal_filter.count_open_trades", return_value=0), \
+         patch("mcp_server.tools.signal_filter.get_open_base_symbols", return_value=[]), \
          patch("mcp_server.tools.signal_filter.get_recent_losses", return_value=3):
 
         result = await apply_filters(mock_session, "123456789", _payload(), score=85, grade="A")

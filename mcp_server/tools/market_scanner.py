@@ -5,6 +5,7 @@ import httpx, pytz
 from mcp_server.config import get_settings, FNO_SYMBOLS, NSE_BASE_URL, BINANCE_BASE_URL
 from mcp_server.tools.institutional_detector import analyze_institutional_activity, detect_htf_structure
 from mcp_server.tools.decision_engine import score_decision
+from mcp_server.tools.claude_analyzer import evaluate_setup
 from mcp_server.tools.options_analysis import analyze_option_chain, is_near_max_pain
 from mcp_server.resources.feeds import fetch_nse_option_chain, fetch_binance_klines, _get_nse_cookies
 
@@ -47,7 +48,7 @@ class MarketScanner:
         h4=detect_htf_structure(_sl(c,30),_sl(h,30),_sl(l,30))
         support=min(l[-20:]); resistance=max(h[-20:])
         inst=analyze_institutional_activity(o,h,l,c,v,support,resistance,weekly)
-        if inst.institutional_bias=="NEUTRAL" and inst.total_score<10: return None
+        if inst.institutional_bias=="NEUTRAL" and inst.total_score<5: return None
         direction=inst.institutional_bias
         if direction=="NEUTRAL": return None
         sig_dir="LONG" if direction=="BULLISH" else "SHORT"
@@ -71,12 +72,21 @@ class MarketScanner:
                 if raw_o: options_data=analyze_option_chain(raw_o,cur)
             except Exception as e: logger.debug(f"Options chain {symbol}: {e}")
         pcr_v=options_data.get("pcr",1.0); mp=options_data.get("max_pain")
-        pcr_c=(sig_dir=="LONG" and options_data.get("options_direction")=="BULLISH") or (sig_dir=="SHORT" and options_data.get("options_direction")=="BEARISH")
-        near_mp=mp and is_near_max_pain(cur,mp)
-        gex_s=options_data.get("gex",0)>0 if sig_dir=="LONG" else options_data.get("gex",0)<0
-        opts_conf=(sig_dir=="LONG" and options_data.get("options_direction")=="BEARISH") or (sig_dir=="SHORT" and options_data.get("options_direction")=="BULLISH")
-        decision=score_decision(weekly_trend=weekly,daily_structure=daily,h4_flow=h4,signal_direction=sig_dir,institutional=inst,poi_type=poi,trap_confirmed=trap,ltf_choch=ltf_choch,volume_spike=vol_spike,in_discount=in_discount,pcr_confirms=pcr_c,near_max_pain=near_mp,gex_supports=gex_s,options_conflict=opts_conf,is_index=(segment=="INDICES"),is_killzone=kz,is_session_open=kz,htf_ob_confluence=inst.breaker_block,first_touch_ob=not inst.mitigation_block,ob_already_touched=inst.mitigation_block,is_lunch_hour=lunch,low_volume_session=not kz and hm>15*60,segment=segment)
-        if not decision.send: return None
+        # ── Claude-powered decision ────────────────────────────────
+        opts_line={"pcr":pcr_v,"max_pain":mp,"options_direction":options_data.get("options_direction")} if options_data else None
+        claude=await evaluate_setup(symbol=symbol,segment=segment,timeframe=15,current_price=cur,closes=c,highs=h,lows=l,volumes=v,inst_bias=inst.institutional_bias,inst_score=inst.total_score,inst_evidence=inst.evidence,liquidity_event=inst.liquidity_event.value,breaker_block=inst.breaker_block,propulsion_block=inst.propulsion_block,mitigation_block=inst.mitigation_block,wyckoff_phase=inst.wyckoff_phase.value,weekly_trend=weekly,daily_structure=daily,h4_flow=h4,in_discount=in_discount,is_killzone=kz,ltf_choch=ltf_choch,volume_spike=vol_spike,options_data=opts_line)
+        if claude is not None:
+            if not claude.send: logger.info(f"Claude rejected {symbol}: {claude.risk_factors}"); return None
+            sig_dir=claude.direction; sig_grade=claude.grade; sig_score=claude.confidence
+            sig_narrative=claude.narrative+" | ".join(claude.key_reasons[:2]); sig_evidence=claude.key_reasons+inst.evidence[:2]
+        else:
+            pcr_c=(sig_dir=="LONG" and options_data.get("options_direction")=="BULLISH") or (sig_dir=="SHORT" and options_data.get("options_direction")=="BEARISH")
+            near_mp=mp and is_near_max_pain(cur,mp)
+            gex_s=options_data.get("gex",0)>0 if sig_dir=="LONG" else options_data.get("gex",0)<0
+            opts_conf=(sig_dir=="LONG" and options_data.get("options_direction")=="BEARISH") or (sig_dir=="SHORT" and options_data.get("options_direction")=="BULLISH")
+            decision=score_decision(weekly_trend=weekly,daily_structure=daily,h4_flow=h4,signal_direction=sig_dir,institutional=inst,poi_type=poi,trap_confirmed=trap,ltf_choch=ltf_choch,volume_spike=vol_spike,in_discount=in_discount,pcr_confirms=pcr_c,near_max_pain=near_mp,gex_supports=gex_s,options_conflict=opts_conf,is_index=(segment=="INDICES"),is_killzone=kz,is_session_open=kz,htf_ob_confluence=inst.breaker_block,first_touch_ob=not inst.mitigation_block,ob_already_touched=inst.mitigation_block,is_lunch_hour=lunch,low_volume_session=not kz and hm>15*60,segment=segment)
+            if not decision.send: return None
+            sig_grade=decision.grade; sig_score=decision.score; sig_narrative=decision.narrative; sig_evidence=decision.evidence
         options_signal=None
         if segment=="INDICES" and options_data:
             from mcp_server.tools.options_strategy import select_strategy
@@ -91,8 +101,8 @@ class MarketScanner:
         tp3=cur+spread*3 if sig_dir=="LONG" else cur-spread*3
         sl_pts=abs(entry-sl)
         self._last_signals[key]=datetime.utcnow()
-        logger.info(f"SIGNAL: {symbol} {sig_dir} score={decision.score} grade={decision.grade}")
-        return {"instrument":f"{exchange}:{symbol}","base_symbol":symbol,"exchange":exchange,"segment":segment,"direction":sig_dir,"timeframe":"15","signal_type":"INSTITUTIONAL","score":decision.score,"grade":decision.grade,"entry":round(entry,2),"sl":round(sl,2),"tp1":round(tp1,2),"tp2":round(tp2,2),"tp3":round(tp3,2),"sl_points":round(sl_pts,2),"sl_percent":round(sl_pts/entry*100,3),"lots":1,"charges":850.0 if segment in ("INDICES","INDIAN_FNO") else 0,"net_at_tp1":round(sl_pts*50-850,2),"htf_bias":direction,"in_discount":in_discount,"liquidity_swept":inst.liquidity_event.value!="NONE","fvg_present":inst.propulsion_block,"volume_ratio":round(v[-1]/avg_vol,2),"session":"INDIA" if segment in ("INDICES","INDIAN_FNO","INDIAN_STOCKS") else "GLOBAL","trap_present":trap,"is_killzone":kz,"ltf_choch":ltf_choch,"options_pcr":pcr_v,"options_oi_bias":options_data.get("options_direction"),"max_pain":mp,"gex":options_data.get("gex"),"setup_type":f"Institutional {inst.wyckoff_phase.value}|{inst.liquidity_event.value}","narrative":decision.narrative,"htf_timeframe":"4H","confluences":{"htf_bias":direction,"poi_type":poi,"zone_type":"Discount" if in_discount else "Premium","liquidity_swept":inst.liquidity_event.value!="NONE","killzone":kz,"ltf_choch":ltf_choch},"institutional_evidence":inst.evidence,"decision_evidence":decision.evidence,"options_signal":options_signal}
+        logger.info(f"SIGNAL: {symbol} {sig_dir} score={sig_score} grade={sig_grade}")
+        return {"instrument":f"{exchange}:{symbol}","base_symbol":symbol,"exchange":exchange,"segment":segment,"direction":sig_dir,"timeframe":"15","signal_type":"INSTITUTIONAL","score":sig_score,"grade":sig_grade,"entry":round(entry,2),"sl":round(sl,2),"tp1":round(tp1,2),"tp2":round(tp2,2),"tp3":round(tp3,2),"sl_points":round(sl_pts,2),"sl_percent":round(sl_pts/entry*100,3),"lots":1,"charges":850.0 if segment in ("INDICES","INDIAN_FNO") else 0,"net_at_tp1":round(sl_pts*50-850,2),"htf_bias":direction,"in_discount":in_discount,"liquidity_swept":inst.liquidity_event.value!="NONE","fvg_present":inst.propulsion_block,"volume_ratio":round(v[-1]/avg_vol,2),"session":"INDIA" if segment in ("INDICES","INDIAN_FNO","INDIAN_STOCKS") else "GLOBAL","trap_present":trap,"is_killzone":kz,"ltf_choch":ltf_choch,"options_pcr":pcr_v,"options_oi_bias":options_data.get("options_direction"),"max_pain":mp,"gex":options_data.get("gex"),"setup_type":f"Institutional {inst.wyckoff_phase.value}|{inst.liquidity_event.value}","narrative":sig_narrative,"htf_timeframe":"4H","confluences":{"htf_bias":direction,"poi_type":poi,"zone_type":"Discount" if in_discount else "Premium","liquidity_swept":inst.liquidity_event.value!="NONE","killzone":kz,"ltf_choch":ltf_choch},"institutional_evidence":inst.evidence,"decision_evidence":sig_evidence,"options_signal":options_signal}
 
     async def run_full_scan(self, enabled_markets):
         signals=[]; tasks=[]
