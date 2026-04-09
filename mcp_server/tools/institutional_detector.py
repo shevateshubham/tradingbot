@@ -4,7 +4,98 @@ Detects Order Blocks, FVGs, Liquidity Events, Breaker Blocks, Wyckoff phases.
 """
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
+
+
+def detect_htf_structure(
+    closes: list,
+    highs: Optional[list] = None,
+    lows: Optional[list] = None,
+    lookback: int = 3,
+) -> str:
+    """
+    Detect Higher-Timeframe market structure using SMC swing methodology.
+
+    Identifies swing highs and swing lows, then classifies the structure as:
+      BULLISH  — Higher Highs (HH) + Higher Lows (HL)
+      BEARISH  — Lower Highs (LH) + Lower Lows (LL)
+      NEUTRAL  — mixed / insufficient data
+
+    Improvements over simple max/min split:
+    - Uses actual swing H/L detection instead of global max of two halves
+    - Uses actual highs/lows arrays when available (more accurate than closes)
+    - Weights HH/LH (primary BOS signals) heavier than HL/LL
+    - Falls back to mean-slope when swing data is insufficient
+    - Adaptive lookback capped at n//5 to avoid over-smoothing
+
+    Parameters
+    ----------
+    closes   : list of close prices
+    highs    : list of bar highs (optional — falls back to closes)
+    lows     : list of bar lows  (optional — falls back to closes)
+    lookback : bars on each side of a swing point (default 3)
+
+    Returns
+    -------
+    "BULLISH" | "BEARISH" | "NEUTRAL"
+    """
+    n = len(closes)
+    if n < 15:
+        return "NEUTRAL"
+
+    ph = highs if (highs is not None and len(highs) == n) else closes
+    pl = lows  if (lows  is not None and len(lows)  == n) else closes
+    lb = max(2, min(lookback, n // 5))  # adaptive, never over-smooth
+
+    # ── Swing detection ────────────────────────────────────────────
+    sh_vals: list = []
+    sl_vals: list = []
+
+    for i in range(lb, n - lb):
+        win_h = ph[max(0, i - lb): i + lb + 1]
+        win_l = pl[max(0, i - lb): i + lb + 1]
+        if ph[i] >= max(win_h):
+            sh_vals.append(ph[i])
+        if pl[i] <= min(win_l):
+            sl_vals.append(pl[i])
+
+    # ── Fallback: mean-slope when insufficient swings ──────────────
+    if len(sh_vals) < 2 or len(sl_vals) < 2:
+        mid = n // 2
+        avg_first  = sum(closes[:mid]) / max(1, mid)
+        avg_second = sum(closes[mid:]) / max(1, n - mid)
+        threshold  = avg_first * 0.002       # 0.2% move counts as trend
+        if avg_second - avg_first > threshold:
+            return "BULLISH"
+        elif avg_first - avg_second > threshold:
+            return "BEARISH"
+        return "NEUTRAL"
+
+    # ── Score last 3 swings ────────────────────────────────────────
+    recent_sh = sh_vals[-3:]
+    recent_sl = sl_vals[-3:]
+
+    bull = bear = 0
+
+    # Swing highs: HH = +2 (BOS signal), LH = −2
+    for i in range(1, len(recent_sh)):
+        if recent_sh[i] > recent_sh[i - 1]:
+            bull += 2
+        elif recent_sh[i] < recent_sh[i - 1]:
+            bear += 2
+
+    # Swing lows: HL = +1 (continuation), LL = −1
+    for i in range(1, len(recent_sl)):
+        if recent_sl[i] > recent_sl[i - 1]:
+            bull += 1
+        elif recent_sl[i] < recent_sl[i - 1]:
+            bear += 1
+
+    if bull >= 2 and bull > bear:
+        return "BULLISH"
+    elif bear >= 2 and bear > bull:
+        return "BEARISH"
+    return "NEUTRAL"
 
 
 class LiquidityEvent(Enum):
