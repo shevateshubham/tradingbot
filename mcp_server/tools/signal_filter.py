@@ -12,12 +12,12 @@ import pytz
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mcp_server.config import (
-    TIMEFRAME_MODES, QUALITY_FILTERS, MAX_CONSECUTIVE_LOSSES, get_settings,
+    TIMEFRAME_MODES, QUALITY_FILTERS, MAX_CONSECUTIVE_LOSSES, MAX_SPREAD_PERCENT, get_settings,
 )
 from mcp_server.models.database import (
     get_or_create_user, get_signals_sent_today, count_open_trades,
     get_recent_losses, DiscardedSignal, UserPreferences,
-    increment_signals_today,
+    increment_signals_today, get_open_base_symbols,
 )
 
 logger = logging.getLogger(__name__)
@@ -159,6 +159,15 @@ async def apply_filters(
         await _log_discard(session, payload, reason, chat_id, score, grade)
         return FilterResult(False, reason, user)
 
+    # ── 4b. Spread too wide ───────────────────────────────────────
+    spread = payload.get("spread")
+    entry = payload.get("entry") or payload.get("ob_mid") or payload.get("close") or 0
+    if spread and entry and (spread / entry * 100) > MAX_SPREAD_PERCENT:
+        reason = f"spread_too_wide:{spread/entry*100:.3f}%>{MAX_SPREAD_PERCENT}%"
+        logger.debug(f"Discarding {instrument}: {reason}")
+        await _log_discard(session, payload, reason, chat_id, score, grade)
+        return FilterResult(False, reason, user)
+
     # ── 5. Daily signal limit ─────────────────────────────────────
     max_today = user.max_signals_per_day
     sent_today = await get_signals_sent_today(session, user.user_id)
@@ -179,6 +188,32 @@ async def apply_filters(
         logger.info(f"Max active trades reached for chat_id={chat_id}: {open_count}")
         await _log_discard(session, payload, reason, chat_id, score, grade)
         return FilterResult(False, reason, user)
+
+    # ── 6b. Correlated instrument already active ──────────────────
+    CORRELATED_PAIRS = {
+        "NIFTY":       ["BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"],
+        "BANKNIFTY":   ["NIFTY", "FINNIFTY"],
+        "FINNIFTY":    ["NIFTY", "BANKNIFTY"],
+        "MIDCPNIFTY":  ["NIFTY"],
+        "BTCUSDT":     ["ETHUSDT", "BNBUSDT"],
+        "ETHUSDT":     ["BTCUSDT"],
+        "BNBUSDT":     ["BTCUSDT"],
+        "XAUUSDT":     ["XAUUSD"],
+        "XAUUSD":      ["XAUUSDT"],
+        "EURUSD":      ["GBPUSD"],
+        "GBPUSD":      ["EURUSD"],
+    }
+    base_sym = payload.get("base_symbol") or instrument.split(":")[-1]
+    correlated = CORRELATED_PAIRS.get(base_sym.upper(), [])
+    if correlated:
+        open_syms = await get_open_base_symbols(session, chat_id)
+        open_syms_upper = [s.upper() for s in open_syms]
+        conflict = next((s for s in correlated if s in open_syms_upper), None)
+        if conflict:
+            reason = f"correlated_instrument_active:{conflict}"
+            logger.info(f"Discarding {instrument}: {reason}")
+            await _log_discard(session, payload, reason, chat_id, score, grade)
+            return FilterResult(False, reason, user)
 
     # ── 7. Consecutive loss protection ────────────────────────────
     recent_losses = await get_recent_losses(session, chat_id, hours=24)

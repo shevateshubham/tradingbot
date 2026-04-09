@@ -48,6 +48,7 @@ class WebhookPayload(BaseModel):
     close:           float           = 0.0
     high:            Optional[float] = None
     low:             Optional[float] = None
+    spread:          Optional[float] = None           # bid-ask spread from Pine Script
     timestamp:       str             = ""
 
     @validator("direction")

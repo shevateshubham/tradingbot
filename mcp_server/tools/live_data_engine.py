@@ -134,6 +134,7 @@ class LiveDataEngine:
             from mcp_server.tools.institutional_detector import analyze_institutional_activity
             from mcp_server.tools.decision_engine import score_decision
             from mcp_server.tools.options_analysis import analyze_option_chain,is_near_max_pain
+            from mcp_server.tools.claude_analyzer import evaluate_setup
             ohlcv=self._b[sym][tf].get_ohlcv();hist=self._hist.get(sym,{})
             m={k:(hist.get(k,[])+ohlcv.get(k,[]))[-200:] for k in ("opens","highs","lows","closes","volumes")}
             if len(m["closes"])<30:return
@@ -144,7 +145,7 @@ class LiveDataEngine:
             daily=detect_htf_structure(_slice(c,50),_slice(h,50),_slice(l,50))
             h4=detect_htf_structure(_slice(c,20),_slice(h,20),_slice(l,20))
             inst=analyze_institutional_activity(o,h,l,c,v,min(l[-20:]),max(h[-20:]),weekly)
-            if inst.institutional_bias=="NEUTRAL" and inst.total_score<10:return
+            if inst.institutional_bias=="NEUTRAL" and inst.total_score<5:return
             sd="LONG" if inst.institutional_bias=="BULLISH" else "SHORT"
             od={};raw_o=await self._get_oc(sym)
             if raw_o:od=analyze_option_chain(raw_o,cur)
@@ -159,8 +160,18 @@ class LiveDataEngine:
             lunch=12*60<=hm<=13*60+30
             eq=(max(h[-50:])+min(l[-50:]))/2 if len(h)>=50 else (max(h[-20:])+min(l[-20:]))/2
             poi="BREAKER" if inst.breaker_block else "OB_FVG" if inst.propulsion_block else "OB"
-            dec=score_decision(weekly_trend=weekly,daily_structure=daily,h4_flow=h4,signal_direction=sd,institutional=inst,poi_type=poi,trap_confirmed=trap,ltf_choch=ltf,volume_spike=vs,in_discount=cur<eq,pcr_confirms=(sd=="LONG" and dir_o=="BULLISH") or (sd=="SHORT" and dir_o=="BEARISH"),near_max_pain=mp and is_near_max_pain(cur,mp),gex_supports=od.get("gex",0)>0 if sd=="LONG" else od.get("gex",0)<0,options_conflict=(sd=="LONG" and dir_o=="BEARISH") or (sd=="SHORT" and dir_o=="BULLISH"),is_index=True,is_killzone=kz,is_session_open=kz,htf_ob_confluence=inst.breaker_block,first_touch_ob=not inst.mitigation_block,ob_already_touched=inst.mitigation_block,is_lunch_hour=lunch,low_volume_session=not kz and hm>15*60,segment="INDICES")
-            if not dec.send:return
+            # ── Claude-powered decision ────────────────────────────────
+            claude=await evaluate_setup(symbol=sym,segment="INDICES",timeframe=tf,current_price=cur,closes=c,highs=h,lows=l,volumes=v,inst_bias=inst.institutional_bias,inst_score=inst.total_score,inst_evidence=inst.evidence,liquidity_event=inst.liquidity_event.value,breaker_block=inst.breaker_block,propulsion_block=inst.propulsion_block,mitigation_block=inst.mitigation_block,wyckoff_phase=inst.wyckoff_phase.value,weekly_trend=weekly,daily_structure=daily,h4_flow=h4,in_discount=cur<eq,is_killzone=kz,ltf_choch=ltf,volume_spike=vs,options_data=od or None)
+            if claude is not None:
+                if not claude.send:logger.info(f"Claude rejected {sym} {tf}m: {claude.risk_factors}");return
+                sd=claude.direction;sig_grade=claude.grade;sig_score=claude.confidence
+                sig_narrative=claude.narrative+" | ".join(claude.key_reasons[:2])
+                sig_evidence=claude.key_reasons+inst.evidence[:2]
+            else:
+                # Fallback to scoring engine
+                dec=score_decision(weekly_trend=weekly,daily_structure=daily,h4_flow=h4,signal_direction=sd,institutional=inst,poi_type=poi,trap_confirmed=trap,ltf_choch=ltf,volume_spike=vs,in_discount=cur<eq,pcr_confirms=(sd=="LONG" and dir_o=="BULLISH") or (sd=="SHORT" and dir_o=="BEARISH"),near_max_pain=mp and is_near_max_pain(cur,mp),gex_supports=od.get("gex",0)>0 if sd=="LONG" else od.get("gex",0)<0,options_conflict=(sd=="LONG" and dir_o=="BEARISH") or (sd=="SHORT" and dir_o=="BULLISH"),is_index=True,is_killzone=kz,is_session_open=kz,htf_ob_confluence=inst.breaker_block,first_touch_ob=not inst.mitigation_block,ob_already_touched=inst.mitigation_block,is_lunch_hour=lunch,low_volume_session=not kz and hm>15*60,segment="INDICES")
+                if not dec.send:return
+                sig_grade=dec.grade;sig_score=dec.score;sig_narrative=dec.narrative;sig_evidence=dec.evidence
             os=None
             if od:
                 from mcp_server.tools.options_strategy import select_strategy
@@ -171,8 +182,8 @@ class LiveDataEngine:
             sp=cur*0.004;entry=cur;sl=cur-sp if sd=="LONG" else cur+sp
             tp1=cur+sp if sd=="LONG" else cur-sp;tp2=cur+sp*2 if sd=="LONG" else cur-sp*2;tp3=cur+sp*3 if sd=="LONG" else cur-sp*3
             sl_pts=abs(entry-sl);lv=inst_info["lot_size"]
-            sig={"instrument":f"NSE:{sym}","base_symbol":sym,"exchange":"NSE","segment":"INDICES","direction":sd,"timeframe":str(tf),"signal_type":"INSTITUTIONAL","score":dec.score,"grade":dec.grade,"entry":round(entry,2),"sl":round(sl,2),"tp1":round(tp1,2),"tp2":round(tp2,2),"tp3":round(tp3,2),"sl_points":round(sl_pts,2),"sl_percent":round(sl_pts/entry*100,3),"lots":1,"lot_size":lv,"charges":850.0,"net_at_tp1":round(sl_pts*lv-850,2),"htf_bias":inst.institutional_bias,"in_discount":cur<eq,"liquidity_swept":inst.liquidity_event.value!="NONE","fvg_present":inst.propulsion_block,"volume_ratio":round(v[-1]/avg_v,2),"session":"INDIA","trap_present":trap,"is_killzone":kz,"ltf_choch":ltf,"options_pcr":pcr,"options_oi_bias":dir_o,"max_pain":mp,"gex":od.get("gex"),"setup_type":f"{inst.wyckoff_phase.value}|{inst.liquidity_event.value}","narrative":dec.narrative,"htf_timeframe":"4H","confluences":{"htf_bias":inst.institutional_bias,"poi_type":poi,"zone_type":"Discount" if cur<eq else "Premium","liquidity_swept":inst.liquidity_event.value!="NONE","killzone":kz,"ltf_choch":ltf},"institutional_evidence":inst.evidence,"decision_evidence":dec.evidence,"options_signal":os}
-            logger.info(f"SIGNAL: NSE:{sym} {sd} score={dec.score} grade={dec.grade} tf={tf}m")
+            sig={"instrument":f"NSE:{sym}","base_symbol":sym,"exchange":"NSE","segment":"INDICES","direction":sd,"timeframe":str(tf),"signal_type":"INSTITUTIONAL","score":sig_score,"grade":sig_grade,"entry":round(entry,2),"sl":round(sl,2),"tp1":round(tp1,2),"tp2":round(tp2,2),"tp3":round(tp3,2),"sl_points":round(sl_pts,2),"sl_percent":round(sl_pts/entry*100,3),"lots":1,"lot_size":lv,"charges":850.0,"net_at_tp1":round(sl_pts*lv-850,2),"htf_bias":inst.institutional_bias,"in_discount":cur<eq,"liquidity_swept":inst.liquidity_event.value!="NONE","fvg_present":inst.propulsion_block,"volume_ratio":round(v[-1]/avg_v,2),"session":"INDIA","trap_present":trap,"is_killzone":kz,"ltf_choch":ltf,"options_pcr":pcr,"options_oi_bias":dir_o,"max_pain":mp,"gex":od.get("gex"),"setup_type":f"{inst.wyckoff_phase.value}|{inst.liquidity_event.value}","narrative":sig_narrative,"htf_timeframe":"4H","confluences":{"htf_bias":inst.institutional_bias,"poi_type":poi,"zone_type":"Discount" if cur<eq else "Premium","liquidity_swept":inst.liquidity_event.value!="NONE","killzone":kz,"ltf_choch":ltf},"institutional_evidence":inst.evidence,"decision_evidence":sig_evidence,"options_signal":os}
+            logger.info(f"SIGNAL: NSE:{sym} {sd} score={sig_score:.0f} grade={sig_grade} tf={tf}m (claude={'yes' if claude else 'fallback'})")
             if self._cb:await self._cb(sig)
         except Exception as e:logger.error(f"Process {sym} {tf}m: {e}",exc_info=True)
 
