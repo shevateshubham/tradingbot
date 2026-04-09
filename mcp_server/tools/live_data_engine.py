@@ -129,6 +129,7 @@ class LiveDataEngine:
             await asyncio.sleep(0.5)
 
     async def _process(self,sym,tf,inst_info):
+        logger.info(f"Analyzing {sym} {tf}m ({self._b[sym][tf].count} candles)...")
         try:
             from mcp_server.tools.institutional_detector import analyze_institutional_activity
             from mcp_server.tools.decision_engine import score_decision
@@ -177,8 +178,13 @@ class LiveDataEngine:
 
     async def _tick(self):
         prices=await self._f.fetch_indices()
-        if not prices:return
+        if not prices:
+            logger.warning("Live tick: no data from NSE")
+            return
         now=datetime.now(IST)
+        price_summary=", ".join(f"{sym}={prices[sym]['price']:.0f}" for sym in ("NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY") if sym in prices)
+        candle_counts={sym:{tf:self._b[sym][tf].count for tf in TIMEFRAMES} for inst in INDICES for sym in [inst["symbol"]]}
+        logger.info(f"Live tick @ {now.strftime('%H:%M:%S')} IST | {price_summary} | candles={candle_counts}")
         for inst in INDICES:
             sym=inst["symbol"];data=prices.get(sym)
             if not data or not data.get("price"):continue

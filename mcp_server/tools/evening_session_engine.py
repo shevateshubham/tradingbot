@@ -104,6 +104,7 @@ class EveningSessionEngine:
     async def _process(self,sym,tf,inst_info):
         key=f"{sym}:{tf}"
         if key in self._last_sigs and (datetime.utcnow()-self._last_sigs[key]).total_seconds()/60<60: return
+        logger.info(f"Analyzing {inst_info['display']} {tf}m ({self._b[sym][tf].count} candles)...")
         try:
             from mcp_server.tools.institutional_detector import analyze_institutional_activity
             from mcp_server.tools.decision_engine import score_decision
@@ -141,8 +142,13 @@ class EveningSessionEngine:
         except Exception as e: logger.error(f"Evening process {sym} {tf}m: {e}",exc_info=True)
     async def _tick(self):
         prices=await self._fetch_prices()
-        if not prices: return
+        if not prices:
+            logger.warning("Evening tick: no prices fetched")
+            return
         now=datetime.now(IST)
+        price_summary=", ".join(f"{inst['display']}={prices[inst['symbol']]['price']:.4f}" for inst in EVENING_INSTRUMENTS if inst["symbol"] in prices)
+        candle_counts={inst["display"]:{tf:self._b[inst["symbol"]][tf].count for tf in TIMEFRAMES} for inst in EVENING_INSTRUMENTS}
+        logger.info(f"Evening tick @ {now.strftime('%H:%M:%S')} IST | {price_summary} | candles={candle_counts}")
         for inst in EVENING_INSTRUMENTS:
             sym=inst["symbol"];data=prices.get(sym)
             if not data or not data.get("price"): continue
