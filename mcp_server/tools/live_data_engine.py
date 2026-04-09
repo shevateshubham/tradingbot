@@ -208,7 +208,8 @@ class LiveDataEngine:
             p=data["price"];vol=data.get("volume",1000);self._prices[sym]=p
             for tf in TIMEFRAMES:
                 closed=self._b[sym][tf].update(p,now,vol)
-                if closed and self._b[sym][tf].count>=30:
+                hist_count=len(self._hist.get(sym,{}).get("closes",[]))
+                if closed and (self._b[sym][tf].count+hist_count)>=30:
                     await self._process(sym,tf,inst)
 
     async def run(self):

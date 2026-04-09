@@ -75,6 +75,28 @@ class ForexFetcher:
                     if p: return {"price":float(p),"open":float(p),"high":float(p)*1.001,"low":float(p)*0.999,"close":float(p),"volume":1000.0}
         except Exception as e: logger.debug(f"Forex {sym}: {e}")
         return None
+    async def fetch_hist(self,sym,days=200):
+        """Fetch daily historical rates from Frankfurter timeseries API."""
+        base=sym[:3].upper();quote=sym[3:].upper()
+        from datetime import timedelta
+        end=(datetime.now()).strftime("%Y-%m-%d")
+        start=(datetime.now()-timedelta(days=days+80)).strftime("%Y-%m-%d")  # +80 for weekends/holidays
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as c:
+                r=await c.get(f"https://api.frankfurter.app/{start}..{end}",params={"from":base,"to":quote})
+                if r.status_code==200:
+                    raw=r.json().get("rates",{})
+                    if not raw: return None
+                    dates=sorted(raw.keys())
+                    cl=[float(raw[d][quote]) for d in dates if quote in raw[d]]
+                    if len(cl)<20: return None
+                    op=[cl[0]]+cl[:-1]  # open = prev day's close
+                    hi=[c*1.0015 for c in cl];lo=[c*0.9985 for c in cl]
+                    vo=[1000.0]*len(cl)
+                    logger.info(f"Forex hist loaded: {sym} ({len(cl)} daily bars)")
+                    return {"opens":op,"highs":hi,"lows":lo,"closes":cl,"volumes":vo}
+        except Exception as e: logger.debug(f"Forex hist {sym}: {e}")
+        return None
 class EveningSessionEngine:
     def __init__(self):
         self._bin=BinanceFetcher();self._forex=ForexFetcher();self._running=False
@@ -95,8 +117,11 @@ class EveningSessionEngine:
             sym=inst["symbol"]
             if inst["exchange"]=="BINANCE":
                 h=await self._bin.fetch_hist(sym,"15m",200)
-                if h: self._hist[sym]=h;logger.info(f"Hist loaded: {sym}")
-            await asyncio.sleep(0.3)
+                if h: self._hist[sym]=h;logger.info(f"Binance hist loaded: {sym} ({len(h['closes'])} bars)")
+            elif inst["exchange"]=="FOREX":
+                h=await self._forex.fetch_hist(sym,days=200)
+                if h: self._hist[sym]=h
+            await asyncio.sleep(0.5)
     async def _fetch_prices(self):
         tasks={i["symbol"]:(self._bin.fetch_price(i["symbol"]) if i["exchange"]=="BINANCE" else self._forex.fetch_price(i["symbol"])) for i in EVENING_INSTRUMENTS}
         fetched=await asyncio.gather(*tasks.values(),return_exceptions=True)
@@ -166,7 +191,8 @@ class EveningSessionEngine:
             p=data["price"];vol=data.get("volume",1000.0);self._prices[sym]=p
             for tf in TIMEFRAMES:
                 closed=self._b[sym][tf].update(p,now,vol)
-                if closed and self._b[sym][tf].count>=30:
+                hist_count=len(self._hist.get(sym,{}).get("closes",[]))
+                if closed and (self._b[sym][tf].count+hist_count)>=30:
                     await self._process(sym,tf,inst)
     async def run(self):
         self._running=True;logger.info("Evening engine started")
