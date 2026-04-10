@@ -1,7 +1,8 @@
 import asyncio, logging
 from datetime import datetime, date, timezone
 from typing import Optional, List, Dict, Any
-import httpx, pytz
+import httpx
+import pytz
 from mcp_server.config import get_settings, FNO_SYMBOLS, NSE_BASE_URL, BINANCE_BASE_URL
 from mcp_server.tools.institutional_detector import analyze_institutional_activity, detect_htf_structure
 from mcp_server.tools.decision_engine import score_decision
@@ -25,6 +26,49 @@ async def fetch_binance_ohlcv(symbol, interval="15m", limit=100):
         except: continue
     return {"opens":o,"highs":h,"lows":l,"closes":c,"volumes":v} if len(c)>=20 else None
 
+
+_NSE_YF_MAP = {
+    "NIFTY": "%5ENSEI", "BANKNIFTY": "%5ENSEBANK",
+    "FINNIFTY": "%5ENSEFIN", "MIDCPNIFTY": "%5ENSEMIDCAP",
+}
+
+async def fetch_nse_ohlcv(symbol, interval="15m", limit=100):
+    """
+    Fetch OHLCV for NSE index/equity symbols via Yahoo Finance.
+    Yahoo Finance is used as a reliable public fallback — no cookies needed.
+    Symbols: NIFTY→^NSEI, BANKNIFTY→^NSEBANK, stocks→SYMBOL.NS
+    """
+    yf_sym = _NSE_YF_MAP.get(symbol.upper(), f"{symbol.upper()}.NS")
+    # Yahoo Finance chart API — returns 1d of 15m data
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_sym}"
+    params = {"interval": interval, "range": "5d", "includePrePost": "false"}
+    try:
+        async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": "Mozilla/5.0"}) as c:
+            r = await c.get(url, params=params)
+            if r.status_code != 200:
+                logger.warning(f"Yahoo Finance {yf_sym}: HTTP {r.status_code}")
+                return None
+            data = r.json()
+            result = data.get("chart", {}).get("result", [])
+            if not result:
+                return None
+            ts_list   = result[0].get("timestamp", [])
+            quote     = result[0].get("indicators", {}).get("quote", [{}])[0]
+            opens     = [x or 0.0 for x in quote.get("open",  [])]
+            highs     = [x or 0.0 for x in quote.get("high",  [])]
+            lows      = [x or 0.0 for x in quote.get("low",   [])]
+            closes    = [x or 0.0 for x in quote.get("close", [])]
+            volumes   = [x or 0.0 for x in quote.get("volume",[])]
+            # Filter out zero-close bars (pre/post market or gaps)
+            filtered = [(o,h,l,cl,v) for o,h,l,cl,v in zip(opens,highs,lows,closes,volumes) if cl and cl>0]
+            if len(filtered) < 20:
+                return None
+            o2,h2,l2,c2,v2 = zip(*filtered[-limit:])
+            return {"opens":list(o2),"highs":list(h2),"lows":list(l2),"closes":list(c2),"volumes":list(v2)}
+    except Exception as e:
+        logger.warning(f"Yahoo Finance fetch failed for {symbol}: {e}")
+        return None
+
 class MarketScanner:
     def __init__(self):
         self._last_signals={}
@@ -39,6 +83,8 @@ class MarketScanner:
         ohlcv=None
         if exchange=="BINANCE":
             ohlcv=await fetch_binance_ohlcv(symbol,"15m",100)
+        elif exchange=="NSE":
+            ohlcv=await fetch_nse_ohlcv(symbol,"15m",100)
         if not ohlcv or len(ohlcv.get("closes",[]))<30: return None
         o=ohlcv["opens"]; h=ohlcv["highs"]; l=ohlcv["lows"]; c=ohlcv["closes"]; v=ohlcv["volumes"]
         cur=c[-1]

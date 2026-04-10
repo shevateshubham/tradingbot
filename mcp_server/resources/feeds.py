@@ -32,7 +32,10 @@ NSE_HEADERS = {
     ),
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
+    # Deliberately omit "br" — brotli decompression requires the optional
+    # `brotli` package; without it httpx returns raw bytes that fail utf-8
+    # decoding.  gzip is always available and NSE honours it correctly.
+    "Accept-Encoding": "gzip, deflate",
     "Referer": "https://www.nseindia.com/option-chain",
     "Connection": "keep-alive",
     "Cache-Control": "no-cache",
@@ -65,20 +68,24 @@ async def _refresh_nse_cookies() -> Dict[str, str]:
             follow_redirects=True,
             headers=NSE_HEADERS,
         ) as client:
-            # Seed 1: homepage — collect cookies without raising on 4xx
+            # Seed 1: homepage — Akamai sets nsit + bm_sz here; don't raise on 4xx
             resp = await client.get(NSE_BASE_URL)
             cookies: Dict[str, str] = dict(resp.cookies)
-
             if resp.status_code not in (200, 403):
-                logger.warning(f"NSE homepage returned unexpected status {resp.status_code}")
+                logger.warning(f"NSE homepage returned status {resp.status_code}")
 
-            # Seed 2: option-chain page for additional session tokens
-            await asyncio.sleep(1.0)
+            # Seed 2: option-chain page — picks up nseappid / additional WAF tokens
+            await asyncio.sleep(1.5)
             resp2 = await client.get(f"{NSE_BASE_URL}/option-chain")
             cookies.update(dict(resp2.cookies))
 
+            # Seed 3: market-data page — sometimes unlocks the data API tier
+            await asyncio.sleep(1.0)
+            resp3 = await client.get(f"{NSE_BASE_URL}/market-data/live-equity-market")
+            cookies.update(dict(resp3.cookies))
+
             if not cookies:
-                logger.warning("NSE cookie refresh returned no cookies — WAF may be active")
+                logger.warning("NSE cookie refresh returned no cookies — WAF may be blocking")
             else:
                 _nse_cookies = cookies
                 _nse_cookie_fetched_at = time.time()

@@ -49,11 +49,17 @@ class NSEFetcher:
         now=datetime.now(timezone.utc).replace(tzinfo=None)
         if self._cts and (now-self._cts).total_seconds()<self._ttl and self._ck:return self._ck
         try:
-            async with httpx.AsyncClient(timeout=10.0,headers={"User-Agent":"Mozilla/5.0"}) as c:
-                r=await c.get(NSE_HOME);self._ck=dict(r.cookies);self._cts=now
-        except Exception as e:logger.warning(f"Cookie: {e}")
+            async with httpx.AsyncClient(timeout=20.0,follow_redirects=True,headers=self._h()) as c:
+                r=await c.get(NSE_HOME);ck=dict(r.cookies)
+                await asyncio.sleep(1.5)
+                r2=await c.get(f"{NSE_HOME}/option-chain");ck.update(dict(r2.cookies))
+                await asyncio.sleep(1.0)
+                r3=await c.get(f"{NSE_HOME}/market-data/live-equity-market");ck.update(dict(r3.cookies))
+                if ck:self._ck=ck;self._cts=now;logger.info(f"NSE engine cookies: {list(ck.keys())}")
+                else:logger.warning("NSE engine: no cookies returned")
+        except Exception as e:logger.warning(f"Cookie refresh: {e}")
         return self._ck
-    def _h(self):return {"User-Agent":"Mozilla/5.0","Accept":"application/json","Referer":"https://www.nseindia.com/","X-Requested-With":"XMLHttpRequest"}
+    def _h(self):return {"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36","Accept":"application/json, text/plain, */*","Accept-Language":"en-US,en;q=0.9","Accept-Encoding":"gzip, deflate","Referer":"https://www.nseindia.com/option-chain","Connection":"keep-alive","Cache-Control":"no-cache","sec-ch-ua":'"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',"sec-ch-ua-mobile":"?0","sec-ch-ua-platform":'"Windows"',"sec-fetch-dest":"empty","sec-fetch-mode":"cors","sec-fetch-site":"same-origin","X-Requested-With":"XMLHttpRequest"}
     async def fetch_indices(self):
         ck=await self._refresh();result={}
         sm={"NIFTY 50":"NIFTY","NIFTY BANK":"BANKNIFTY","NIFTY FIN SERVICE":"FINNIFTY","NIFTY MIDCAP SELECT":"MIDCPNIFTY","Nifty 50":"NIFTY","Nifty Bank":"BANKNIFTY"}
