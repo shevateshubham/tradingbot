@@ -15,7 +15,18 @@ NSE_HOME="https://www.nseindia.com"
 NSE_INDEX_URL="https://www.nseindia.com/api/allIndices"
 NSE_HIST_URL="https://www.nseindia.com/api/historical/indicesHistory"
 NSE_OC_INDEX="https://www.nseindia.com/api/option-chain-indices"
-TIMEFRAMES=[1,5,15,60]
+# Only 15m and 60m — pass the INTRADAY timeframe filter in signal_filter.py
+TIMEFRAMES=[15,60]
+# Yahoo Finance symbols and per-TF settings for NSE index preload
+YF_NSE_SYM={"NIFTY":"%5ENSEI","BANKNIFTY":"%5ENSEBANK","FINNIFTY":"%5ENSEFIN","MIDCPNIFTY":"%5ENSEMIDCAP"}
+TF_YF_INTERVAL={1:"1m",5:"5m",15:"15m",60:"60m"}
+TF_YF_RANGE={1:"1d",5:"5d",15:"5d",60:"30d"}
+def _calc_atr(highs,lows,closes,period=14):
+    """Average True Range — volatility measure for institutional SL sizing."""
+    if len(closes)<2: return closes[-1]*0.002 if closes else 0.0
+    trs=[max(highs[i]-lows[i],abs(highs[i]-closes[i-1]),abs(lows[i]-closes[i-1])) for i in range(1,len(closes))]
+    n=min(period,len(trs))
+    return sum(trs[-n:])/n if n>0 else closes[-1]*0.002
 
 class Candle:
     __slots__=["ts","open","high","low","close","volume","closed"]
@@ -85,7 +96,7 @@ class LiveDataEngine:
     def __init__(self):
         self._f=NSEFetcher();self._running=False
         self._b={i["symbol"]:{tf:CandleBuilder(i["symbol"],tf) for tf in TIMEFRAMES} for i in INDICES}
-        self._hist={};self._oc={};self._oc_ts={};self._oc_ttl=180
+        self._oc={};self._oc_ts={};self._oc_ttl=180
         self._prices={};self._cb=None;self._last_sigs={}
 
     def set_signal_callback(self,cb):self._cb=cb
@@ -108,44 +119,41 @@ class LiveDataEngine:
         if raw:self._oc[sym]=raw;self._oc_ts[sym]=now
         return raw
 
-    async def _preload_historical(self):
-        logger.info("Preloading historical data from NSE...")
-        for inst in INDICES:
-            sym=inst["symbol"]
-            try:
-                ck=await self._f._refresh()
-                end=date.today();start=end-timedelta(days=60)
-                params={"indexType":sym,"from":start.strftime("%d-%m-%Y"),"to":end.strftime("%d-%m-%Y")}
-                async with httpx.AsyncClient(timeout=15.0,cookies=ck,headers=self._f._h()) as c:
-                    r=await c.get(NSE_HIST_URL,params=params)
-                    if r.status_code==200:
-                        rows=r.json().get("data",{}).get("indexCloseOnlineRecords",[])
-                        if not self._hist.get(sym):self._hist[sym]={"opens":[],"highs":[],"lows":[],"closes":[],"volumes":[]}
-                        for row in rows:
-                            try:
-                                o=float(row.get("EOD_OPEN_INDEX_VAL",0)or 0);h=float(row.get("EOD_HIGH_INDEX_VAL",0)or 0)
-                                l=float(row.get("EOD_LOW_INDEX_VAL",0)or 0);cl=float(row.get("EOD_CLOSING_INDEX_VAL",0)or 0)
-                                if cl>0:
-                                    self._hist[sym]["opens"].append(o);self._hist[sym]["highs"].append(h)
-                                    self._hist[sym]["lows"].append(l);self._hist[sym]["closes"].append(cl)
-                                    self._hist[sym]["volumes"].append(1000.0)
-                            except Exception: pass
-                        logger.info(f"Preloaded {sym}: {len(self._hist.get(sym,{}).get('closes',[]))} candles")
-            except Exception as e:logger.warning(f"Preload failed {sym}: {e}")
-            await asyncio.sleep(0.5)
+    async def _fetch_hist_yf(self,sym,tf):
+        """Fetch per-TF intraday bars from Yahoo Finance for NSE indices."""
+        yf_sym=YF_NSE_SYM.get(sym,f"{sym}.NS")
+        iv=TF_YF_INTERVAL.get(tf,"15m");rng=TF_YF_RANGE.get(tf,"5d")
+        url=f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_sym}"
+        try:
+            async with httpx.AsyncClient(timeout=15.0,headers={"User-Agent":"Mozilla/5.0","Accept":"application/json"}) as c:
+                r=await c.get(url,params={"interval":iv,"range":rng,"includePrePost":"false"})
+                if r.status_code!=200: logger.warning(f"YF {yf_sym} {tf}m: HTTP {r.status_code}"); return None
+                res=r.json().get("chart",{}).get("result",[])
+                if not res: return None
+                q=res[0].get("indicators",{}).get("quote",[{}])[0]
+                cls=[x or 0.0 for x in q.get("close",[])];ops=[x or 0.0 for x in q.get("open",[])]
+                his=[x or 0.0 for x in q.get("high",[])];los=[x or 0.0 for x in q.get("low",[])]
+                vls=[float(x) if x else 1000.0 for x in q.get("volume",[])]
+                f=[(o,h,l,c,v) for o,h,l,c,v in zip(ops,his,los,cls,vls) if c and c>0]
+                if len(f)<20: return None
+                o2,h2,l2,c2,v2=zip(*f)
+                return {"opens":list(o2),"highs":list(h2),"lows":list(l2),"closes":list(c2),"volumes":list(v2)}
+        except Exception as e: logger.debug(f"YF hist {sym} {tf}m: {e}"); return None
 
     async def _process(self,sym,tf,inst_info):
         key=f"{sym}:{tf}"
         if key in self._last_sigs and (datetime.now(timezone.utc).replace(tzinfo=None)-self._last_sigs[key]).total_seconds()<3600:return
-        logger.info(f"Analyzing {sym} {tf}m ({self._b[sym][tf].count} candles)...")
         try:
             from mcp_server.tools.institutional_detector import analyze_institutional_activity
             from mcp_server.tools.decision_engine import score_decision
             from mcp_server.tools.options_analysis import analyze_option_chain,is_near_max_pain
             from mcp_server.tools.claude_analyzer import evaluate_setup
-            ohlcv=self._b[sym][tf].get_ohlcv();hist=self._hist.get(sym,{})
-            m={k:(hist.get(k,[])+ohlcv.get(k,[]))[-200:] for k in ("opens","highs","lows","closes","volumes")}
-            if len(m["closes"])<30:return
+            # Fetch bars live on-demand — no warmup period, no preload required
+            m=await self._fetch_hist_yf(sym,tf)
+            if not m or len(m.get("closes",[]))<20:
+                logger.debug(f"No data for {sym} {tf}m — skipping")
+                return
+            logger.info(f"Analyzing {sym} {tf}m ({len(m['closes'])} bars)...")
             o=m["opens"];h=m["highs"];l=m["lows"];c=m["closes"];v=m["volumes"];cur=c[-1]
             from mcp_server.tools.institutional_detector import detect_htf_structure
             def _slice(arr,n):return arr[-n:] if len(arr)>=n else arr
@@ -190,12 +198,19 @@ class LiveDataEngine:
                     dte=max(1,(3-date.today().weekday())%7 or 7)
                     os=select_strategy(underlying_price=cur,max_pain=mp or cur,pcr=pcr or 1.0,ce_walls=od.get("ce_walls",[]),pe_walls=od.get("pe_walls",[]),days_to_expiry=dte,instrument=sym,directional_bias=inst.institutional_bias)
                 except Exception as e: logger.debug(f"Options strategy {sym}: {e}")
-            sp=cur*0.004;entry=cur;sl=cur-sp if sd=="LONG" else cur+sp
-            tp1=cur+sp if sd=="LONG" else cur-sp;tp2=cur+sp*2 if sd=="LONG" else cur-sp*2;tp3=cur+sp*3 if sd=="LONG" else cur-sp*3
+            # ATR-based SL/TP — volatility-adjusted, institutional grade
+            atr=_calc_atr(h,l,c)
+            sl_dist=max(atr*1.5, cur*0.002)  # 1.5×ATR, floor 0.2% of price
+            entry=cur
+            sl=round(cur-sl_dist if sd=="LONG" else cur+sl_dist, 2)
+            tp1=round(cur+sl_dist if sd=="LONG" else cur-sl_dist, 2)
+            tp2=round(cur+sl_dist*2 if sd=="LONG" else cur-sl_dist*2, 2)
+            tp3=round(cur+sl_dist*3 if sd=="LONG" else cur-sl_dist*3, 2)
             sl_pts=abs(entry-sl);lv=inst_info["lot_size"]
-            sig={"instrument":f"NSE:{sym}","base_symbol":sym,"exchange":"NSE","segment":"INDICES","direction":sd,"timeframe":str(tf),"signal_type":"INSTITUTIONAL","score":sig_score,"grade":sig_grade,"entry":round(entry,2),"sl":round(sl,2),"tp1":round(tp1,2),"tp2":round(tp2,2),"tp3":round(tp3,2),"sl_points":round(sl_pts,2),"sl_percent":round(sl_pts/entry*100,3),"lots":1,"lot_size":lv,"charges":850.0,"net_at_tp1":round(sl_pts*lv-850,2),"htf_bias":inst.institutional_bias,"in_discount":cur<eq,"liquidity_swept":inst.liquidity_event.value!="NONE","fvg_present":inst.propulsion_block,"volume_ratio":round(v[-1]/avg_v,2),"session":"INDIA","trap_present":trap,"is_killzone":kz,"ltf_choch":ltf,"options_pcr":pcr,"options_oi_bias":dir_o,"max_pain":mp,"gex":od.get("gex"),"setup_type":f"{inst.wyckoff_phase.value}|{inst.liquidity_event.value}","narrative":sig_narrative,"htf_timeframe":"4H","confluences":{"htf_bias":inst.institutional_bias,"poi_type":poi,"zone_type":"Discount" if cur<eq else "Premium","liquidity_swept":inst.liquidity_event.value!="NONE","killzone":kz,"ltf_choch":ltf},"institutional_evidence":inst.evidence,"decision_evidence":sig_evidence,"options_signal":os}
+            charges=round(sl_pts*lv*0.0003+850, 2)  # approx brokerage+STT+GST
+            sig={"instrument":f"NSE:{sym}","base_symbol":sym,"exchange":"NSE","segment":"INDICES","direction":sd,"timeframe":str(tf),"signal_type":"INSTITUTIONAL","score":sig_score,"grade":sig_grade,"entry":round(entry,2),"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sl_points":round(sl_pts,2),"sl_percent":round(sl_pts/entry*100,3),"rr_ratio":2.0,"lots":1,"lot_size":lv,"charges":charges,"net_at_tp1":round(sl_pts*lv-charges,2),"net_at_tp2":round(sl_pts*lv*2-charges,2),"net_at_tp3":round(sl_pts*lv*3-charges,2),"atr":round(atr,2),"htf_bias":inst.institutional_bias,"in_discount":cur<eq,"liquidity_swept":inst.liquidity_event.value!="NONE","fvg_present":inst.propulsion_block,"volume_ratio":round(v[-1]/avg_v,2),"session":"INDIA","trap_present":trap,"is_killzone":kz,"ltf_choch":ltf,"options_pcr":pcr,"options_oi_bias":dir_o,"max_pain":mp,"gex":od.get("gex"),"setup_type":f"{inst.wyckoff_phase.value}|{inst.liquidity_event.value}","narrative":sig_narrative,"htf_timeframe":"4H","confluences":{"htf_bias":inst.institutional_bias,"poi_type":poi,"zone_type":"Discount" if cur<eq else "Premium","liquidity_swept":inst.liquidity_event.value!="NONE","killzone":kz,"ltf_choch":ltf},"institutional_evidence":inst.evidence,"decision_evidence":sig_evidence,"options_signal":os}
             self._last_sigs[key]=datetime.now(timezone.utc).replace(tzinfo=None)
-            logger.info(f"SIGNAL: NSE:{sym} {sd} score={sig_score:.0f} grade={sig_grade} tf={tf}m (claude={'yes' if claude else 'fallback'})")
+            logger.info(f"SIGNAL: NSE:{sym} {sd} score={sig_score:.0f} grade={sig_grade} tf={tf}m entry={round(entry,2)} sl={sl} tp2={tp2} atr={round(atr,2)} (claude={'yes' if claude else 'fallback'})")
             if self._cb:await self._cb(sig)
         except Exception as e:logger.error(f"Process {sym} {tf}m: {e}",exc_info=True)
 
@@ -214,14 +229,12 @@ class LiveDataEngine:
             p=data["price"];vol=data.get("volume",1000);self._prices[sym]=p
             for tf in TIMEFRAMES:
                 closed=self._b[sym][tf].update(p,now,vol)
-                hist_count=len(self._hist.get(sym,{}).get("closes",[]))
-                if closed and (self._b[sym][tf].count+hist_count)>=30:
+                if closed:
                     await self._process(sym,tf,inst)
 
     async def run(self):
         self._running=True
-        logger.info("Live engine started")
-        await self._preload_historical()
+        logger.info("Live engine started — bars fetched live on-demand")
         while self._running:
             try:
                 if self.is_open():

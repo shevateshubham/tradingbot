@@ -198,7 +198,10 @@ def format_signal_message(signal_data: dict) -> str:
     # Signal time
     now_ist = datetime.now(IST)
     signal_time = esc(now_ist.strftime("%H:%M IST"))
-    expiry = esc((now_ist + timedelta(hours=4)).strftime("%H:%M IST"))
+    # Expiry scales with timeframe: 15m→4h, 60m→24h, 240m→48h
+    _tf = int(d.get("timeframe", 15)) if str(d.get("timeframe","15")).isdigit() else 15
+    _expiry_h = 4 if _tf <= 15 else (24 if _tf <= 60 else 48)
+    expiry = esc((now_ist + timedelta(hours=_expiry_h)).strftime("%H:%M IST"))
 
     mode_str = "📄 Paper" if d.get("paper_mode", True) else "🔴 Live"
 

@@ -1,57 +1,32 @@
 """
 scripts/diagnose.py — End-to-end pipeline diagnostic.
-
-Tests every stage:
-  1. NSE cookie fetch (feeds.py)
-  2. NSE live index prices
-  3. NSE option chain
-  4. Binance OHLCV
-  5. Institutional analysis (signal scoring)
-  6. Telegram bot connectivity
-
-Run from repo root:
-  python scripts/diagnose.py
+Tests every stage: config → data → analysis → scoring → Telegram
 """
-
-import asyncio
-import os
-import sys
-import json
-import time
-
+import asyncio, os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-PASS = "PASS"
-FAIL = "FAIL"
-SKIP = "SKIP"
-WARN = "WARN"
-
+PASS, FAIL, SKIP, WARN = "PASS", "FAIL", "SKIP", "WARN"
 results = []
 
 def log(stage, status, detail=""):
     tag = {"PASS": "✅", "FAIL": "❌", "SKIP": "⚠️", "WARN": "⚠️"}.get(status, "?")
     line = f"  {tag} [{status}] {stage}"
-    if detail:
-        line += f" — {detail}"
+    if detail: line += f" — {detail}"
     print(line)
     results.append((stage, status, detail))
 
-
-# ─────────────────────────────────────────────────────────────────────
-# 1. Environment / config
-# ─────────────────────────────────────────────────────────────────────
-
+# ─── 1. Config ───────────────────────────────────────────────────────────────
 async def check_config():
     print("\n[1] Configuration")
     try:
         from mcp_server.config import get_settings
         s = get_settings()
         for name, val in [
-            ("TELEGRAM_BOT_TOKEN",  s.telegram_bot_token),
-            ("TELEGRAM_CHAT_ID",    s.telegram_chat_id),
-            ("ANTHROPIC_API_KEY",   s.anthropic_api_key),
-            ("TV_WEBHOOK_SECRET",   s.tv_webhook_secret),
-            ("DATABASE_URL",        s.database_url),
+            ("TELEGRAM_BOT_TOKEN", s.telegram_bot_token),
+            ("TELEGRAM_CHAT_ID",   s.telegram_chat_id),
+            ("ANTHROPIC_API_KEY",  s.anthropic_api_key),
+            ("TV_WEBHOOK_SECRET",  s.tv_webhook_secret),
+            ("DATABASE_URL",       s.database_url),
         ]:
             if val and val not in ("", "changeme"):
                 log(name, PASS, f"{str(val)[:6]}…")
@@ -60,219 +35,214 @@ async def check_config():
     except Exception as e:
         log("config load", FAIL, str(e))
 
-
-# ─────────────────────────────────────────────────────────────────────
-# 2. NSE cookie fetch (feeds.py)
-# ─────────────────────────────────────────────────────────────────────
-
-async def check_nse_cookies():
-    print("\n[2] NSE Cookie Fetch (feeds.py)")
-    try:
-        from mcp_server.resources.feeds import _refresh_nse_cookies
-        t0 = time.time()
-        cookies = await _refresh_nse_cookies()
-        elapsed = round(time.time() - t0, 2)
-        if cookies:
-            log("NSE homepage cookies", PASS, f"{list(cookies.keys())} in {elapsed}s")
-        else:
-            log("NSE homepage cookies", FAIL, f"no cookies returned after {elapsed}s — WAF blocking")
-    except Exception as e:
-        log("NSE cookie fetch", FAIL, str(e))
-
-
-# ─────────────────────────────────────────────────────────────────────
-# 3. NSE live index prices
-# ─────────────────────────────────────────────────────────────────────
-
-async def check_nse_prices():
-    print("\n[3] NSE Live Index Prices")
+# ─── 2. Binance live price + OHLCV ───────────────────────────────────────────
+async def check_binance():
+    print("\n[2] Binance — live price + 15m OHLCV")
     try:
         import httpx
-        from mcp_server.resources.feeds import _get_nse_cookies, NSE_HEADERS, NSE_BASE_URL
-        cookies = await _get_nse_cookies()
-        url = f"{NSE_BASE_URL}/api/allIndices"
-        async with httpx.AsyncClient(timeout=10.0, cookies=cookies, headers=NSE_HEADERS) as c:
-            r = await c.get(url)
+        t0 = time.time()
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.get("https://api.binance.com/api/v3/klines",
+                            params={"symbol":"XAUUSDT","interval":"15m","limit":100})
+        elapsed = round(time.time()-t0, 2)
         if r.status_code == 200:
-            data = r.json().get("data", [])
-            name_map = {
-                "Nifty 50": "NIFTY", "NIFTY 50": "NIFTY",
-                "Nifty Bank": "BANKNIFTY", "NIFTY BANK": "BANKNIFTY",
-                "Nifty Fin Service": "FINNIFTY", "NIFTY FIN SERVICE": "FINNIFTY",
-                "NIFTY MIDCAP SELECT": "MIDCPNIFTY",
-            }
-            found = {}
-            for idx in data:
-                nm = idx.get("indexSymbol", idx.get("index", ""))
-                key = name_map.get(nm)
-                if key:
-                    found[key] = float(idx.get("last", idx.get("lastPrice", 0)) or 0)
-            if found:
-                summary = ", ".join(f"{k}={v:.0f}" for k, v in found.items())
-                log("NSE index prices", PASS, summary)
+            d = r.json()
+            log("Binance XAUUSDT 15m", PASS,
+                f"{len(d)} candles, last_close={float(d[-1][4]):.2f} in {elapsed}s")
+        else:
+            log("Binance XAUUSDT 15m", FAIL, f"HTTP {r.status_code}")
+    except Exception as e:
+        log("Binance", FAIL, str(e))
+
+# ─── 3. Yahoo Finance — Forex 15m ────────────────────────────────────────────
+async def check_yahoo_forex():
+    print("\n[3] Yahoo Finance — EURUSD 15m")
+    try:
+        import httpx
+        t0 = time.time()
+        async with httpx.AsyncClient(timeout=15.0,
+            headers={"User-Agent":"Mozilla/5.0","Accept":"application/json"}) as c:
+            r = await c.get("https://query1.finance.yahoo.com/v8/finance/chart/EURUSD=X",
+                            params={"interval":"15m","range":"5d","includePrePost":"false"})
+        elapsed = round(time.time()-t0, 2)
+        if r.status_code == 200:
+            res = r.json().get("chart",{}).get("result",[])
+            if res:
+                cls = [x for x in res[0].get("indicators",{}).get("quote",[{}])[0].get("close",[]) if x]
+                log("Yahoo EURUSD 15m", PASS, f"{len(cls)} bars, last={cls[-1]:.5f} in {elapsed}s")
             else:
-                log("NSE index prices", WARN, f"HTTP 200 but no index data matched ({len(data)} rows returned)")
+                log("Yahoo EURUSD 15m", WARN, f"HTTP 200 but no result data")
         else:
-            log("NSE index prices", FAIL, f"HTTP {r.status_code}")
+            log("Yahoo EURUSD 15m", FAIL, f"HTTP {r.status_code}")
     except Exception as e:
-        log("NSE index prices", FAIL, str(e))
+        log("Yahoo Forex", FAIL, str(e))
 
-
-# ─────────────────────────────────────────────────────────────────────
-# 4. NSE option chain
-# ─────────────────────────────────────────────────────────────────────
-
-async def check_nse_option_chain():
-    print("\n[4] NSE Option Chain (NIFTY)")
+# ─── 4. Yahoo Finance — NSE index 15m ────────────────────────────────────────
+async def check_yahoo_nse():
+    print("\n[4] Yahoo Finance — NIFTY 15m")
     try:
-        from mcp_server.resources.feeds import fetch_nse_option_chain
+        import httpx
         t0 = time.time()
-        data = await fetch_nse_option_chain("NIFTY", is_index=True)
-        elapsed = round(time.time() - t0, 2)
-        if data and "records" in data:
-            strikes = len(data["records"].get("data", []))
-            log("NSE option chain NIFTY", PASS, f"{strikes} strikes in {elapsed}s")
-        elif data:
-            log("NSE option chain NIFTY", WARN, f"got data but no 'records' key — keys: {list(data.keys())}")
+        async with httpx.AsyncClient(timeout=15.0,
+            headers={"User-Agent":"Mozilla/5.0","Accept":"application/json"}) as c:
+            r = await c.get("https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI",
+                            params={"interval":"15m","range":"5d","includePrePost":"false"})
+        elapsed = round(time.time()-t0, 2)
+        if r.status_code == 200:
+            res = r.json().get("chart",{}).get("result",[])
+            if res:
+                cls = [x for x in res[0].get("indicators",{}).get("quote",[{}])[0].get("close",[]) if x]
+                log("Yahoo NIFTY 15m", PASS, f"{len(cls)} bars, last={cls[-1]:.0f} in {elapsed}s")
+            else:
+                log("Yahoo NIFTY 15m", WARN, "HTTP 200 but no result (market closed?)")
         else:
-            log("NSE option chain NIFTY", FAIL, f"returned None after {elapsed}s (403/timeout/empty)")
+            log("Yahoo NIFTY 15m", FAIL, f"HTTP {r.status_code}")
     except Exception as e:
-        log("NSE option chain NIFTY", FAIL, str(e))
+        log("Yahoo NSE", FAIL, str(e))
 
-
-# ─────────────────────────────────────────────────────────────────────
-# 5. Binance OHLCV
-# ─────────────────────────────────────────────────────────────────────
-
-async def check_binance():
-    print("\n[5] Binance OHLCV (BTCUSDT 15m)")
+# ─── 5. NSE cookie + live price ──────────────────────────────────────────────
+async def check_nse_live():
+    print("\n[5] NSE Live Index Prices")
     try:
-        from mcp_server.resources.feeds import fetch_binance_klines
+        from mcp_server.tools.live_data_engine import NSEFetcher
+        f = NSEFetcher()
         t0 = time.time()
-        data = await fetch_binance_klines("BTCUSDT", "15m", 50)
-        elapsed = round(time.time() - t0, 2)
-        if data and len(data) >= 20:
-            last_close = float(data[-1][4])
-            log("Binance OHLCV BTCUSDT", PASS, f"{len(data)} candles, last close={last_close:.2f} in {elapsed}s")
+        prices = await f.fetch_indices()
+        elapsed = round(time.time()-t0, 2)
+        if prices:
+            summary = ", ".join(f"{k}={v['price']:.0f}" for k,v in prices.items())
+            log("NSE live prices", PASS, f"{summary} in {elapsed}s")
         else:
-            log("Binance OHLCV BTCUSDT", FAIL, f"returned {len(data) if data else 0} candles")
+            log("NSE live prices", WARN, f"no data returned (403 or market closed) in {elapsed}s")
     except Exception as e:
-        log("Binance OHLCV BTCUSDT", FAIL, str(e))
+        log("NSE live prices", FAIL, str(e))
 
-
-# ─────────────────────────────────────────────────────────────────────
-# 6. Institutional analysis on live Binance data
-# ─────────────────────────────────────────────────────────────────────
-
-async def check_institutional_analysis():
-    print("\n[6] Institutional Analysis (BTCUSDT — live data)")
+# ─── 6. Institutional analysis — Binance data ────────────────────────────────
+async def check_institutional():
+    print("\n[6] Institutional Analysis (XAUUSDT 15m — live)")
     try:
-        from mcp_server.resources.feeds import fetch_binance_klines
+        import httpx
         from mcp_server.tools.institutional_detector import analyze_institutional_activity, detect_htf_structure
-
-        raw = await fetch_binance_klines("BTCUSDT", "15m", 100)
-        if not raw or len(raw) < 30:
-            log("institutional analysis", SKIP, "Binance fetch returned no data — skipping")
-            return
-
-        o, h, l, c, v = [], [], [], [], []
-        for candle in raw:
-            try:
-                o.append(float(candle[1])); h.append(float(candle[2]))
-                l.append(float(candle[3])); c.append(float(candle[4]))
-                v.append(float(candle[5]))
-            except Exception:
-                continue
-
-        _sl = min(l[-25:-4]) if len(l) >= 25 else min(l)
-        _sh = max(h[-25:-4]) if len(h) >= 25 else max(h)
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            r = await c.get("https://api.binance.com/api/v3/klines",
+                            params={"symbol":"XAUUSDT","interval":"15m","limit":100})
+        if r.status_code != 200:
+            log("institutional (XAUUSDT)", SKIP, f"Binance HTTP {r.status_code}"); return
+        d = r.json()
+        o,h,l,c,v = [],[],[],[],[]
+        for x in d:
+            o.append(float(x[1])); h.append(float(x[2]))
+            l.append(float(x[3])); c.append(float(x[4])); v.append(float(x[5]))
+        _sl = min(l[-25:-4]); _sh = max(h[-25:-4])
         weekly = detect_htf_structure(c[-100:], h[-100:], l[-100:])
-        inst   = analyze_institutional_activity(o, h, l, c, v, _sl, _sh, weekly)
-
-        log(
-            "institutional analysis",
-            PASS,
+        inst = analyze_institutional_activity(o, h, l, c, v, _sl, _sh, weekly)
+        log("institutional (XAUUSDT)", PASS,
             f"bias={inst.institutional_bias} score={inst.total_score:.0f} "
-            f"event={inst.liquidity_event.value} evidence={inst.evidence[:2]}"
-        )
+            f"event={inst.liquidity_event.value} wyckoff={inst.wyckoff_phase.value}")
     except Exception as e:
         log("institutional analysis", FAIL, str(e))
 
-
-# ─────────────────────────────────────────────────────────────────────
-# 7. Claude API
-# ─────────────────────────────────────────────────────────────────────
-
-async def check_claude_api():
-    print("\n[7] Claude API (evaluate_setup)")
+# ─── 7. Full engine _process simulation ──────────────────────────────────────
+async def check_engine_process():
+    print("\n[7] Engine _process simulation (XAUUSDT 15m — no Telegram)")
     try:
-        from mcp_server.resources.feeds import fetch_binance_klines
+        from mcp_server.tools.evening_session_engine import EveningSessionEngine, EVENING_INSTRUMENTS
+        engine = EveningSessionEngine()
+        inst_info = next(i for i in EVENING_INSTRUMENTS if i["symbol"]=="XAUUSDT")
+        signal_sent = []
+        async def cb(sig): signal_sent.append(sig)
+        engine.set_signal_callback(cb)
+        t0 = time.time()
+        await engine._process("XAUUSDT", 15, inst_info)
+        elapsed = round(time.time()-t0, 2)
+        if signal_sent:
+            s = signal_sent[0]
+            log("engine _process XAUUSDT 15m", PASS,
+                f"SIGNAL: {s['direction']} score={s['score']} grade={s['grade']} "
+                f"entry={s['entry']} sl={s['sl']} tp1={s['tp1']} in {elapsed}s")
+        else:
+            log("engine _process XAUUSDT 15m", WARN,
+                f"no signal generated (neutral bias or score<72) in {elapsed}s — check Railway logs")
+    except Exception as e:
+        log("engine _process", FAIL, str(e))
+
+# ─── 8. Claude API ───────────────────────────────────────────────────────────
+async def check_claude():
+    print("\n[8] Claude API (evaluate_setup)")
+    try:
+        import httpx
         from mcp_server.tools.institutional_detector import analyze_institutional_activity, detect_htf_structure
         from mcp_server.tools.claude_analyzer import evaluate_setup
-
-        raw = await fetch_binance_klines("BTCUSDT", "15m", 60)
-        if not raw or len(raw) < 30:
-            log("Claude API", SKIP, "no Binance data to test with")
-            return
-
-        o, h, l, c, v = [], [], [], [], []
-        for candle in raw:
-            try:
-                o.append(float(candle[1])); h.append(float(candle[2]))
-                l.append(float(candle[3])); c.append(float(candle[4]))
-                v.append(float(candle[5]))
-            except Exception:
-                continue
-
-        _sl = min(l[-25:-4]) if len(l) >= 25 else min(l)
-        _sh = max(h[-25:-4]) if len(h) >= 25 else max(h)
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            r = await c.get("https://api.binance.com/api/v3/klines",
+                            params={"symbol":"XAUUSDT","interval":"15m","limit":60})
+        if r.status_code != 200:
+            log("Claude API", SKIP, "no Binance data"); return
+        d = r.json()
+        o,h,l,c,v=[],[],[],[],[]
+        for x in d:
+            o.append(float(x[1])); h.append(float(x[2]))
+            l.append(float(x[3])); c.append(float(x[4])); v.append(float(x[5]))
+        _sl = min(l[-25:-4]); _sh = max(h[-25:-4])
         weekly = detect_htf_structure(c, h, l)
-        daily  = detect_htf_structure(c[-60:], h[-60:], l[-60:])
-        h4     = detect_htf_structure(c[-20:], h[-20:], l[-20:])
-        inst   = analyze_institutional_activity(o, h, l, c, v, _sl, _sh, weekly)
-        eq     = (max(h[-50:]) + min(l[-50:])) / 2
-
+        daily = detect_htf_structure(c[-50:], h[-50:], l[-50:])
+        h4 = detect_htf_structure(c[-20:], h[-20:], l[-20:])
+        inst = analyze_institutional_activity(o, h, l, c, v, _sl, _sh, weekly)
+        eq = (max(h[-50:]) + min(l[-50:])) / 2
         t0 = time.time()
         decision = await evaluate_setup(
-            symbol="BTCUSDT", segment="CRYPTO", timeframe=15,
+            symbol="XAUUSD", segment="COMMODITY", timeframe=15,
             current_price=c[-1], closes=c, highs=h, lows=l, volumes=v,
             inst_bias=inst.institutional_bias, inst_score=inst.total_score,
             inst_evidence=inst.evidence, liquidity_event=inst.liquidity_event.value,
             breaker_block=inst.breaker_block, propulsion_block=inst.propulsion_block,
             mitigation_block=inst.mitigation_block, wyckoff_phase=inst.wyckoff_phase.value,
             weekly_trend=weekly, daily_structure=daily, h4_flow=h4,
-            in_discount=c[-1] < eq, is_killzone=False, ltf_choch=False,
-            volume_spike=False, options_data=None,
+            in_discount=c[-1]<eq, is_killzone=False, ltf_choch=False, volume_spike=False,
         )
-        elapsed = round(time.time() - t0, 2)
-
-        if decision is not None:
-            log(
-                "Claude API",
-                PASS,
-                f"send={decision.send} grade={decision.grade} "
-                f"confidence={decision.confidence:.0f} in {elapsed}s"
-            )
+        elapsed = round(time.time()-t0, 2)
+        if decision:
+            log("Claude API", PASS,
+                f"send={decision.send} grade={decision.grade} confidence={decision.confidence:.0f} in {elapsed}s")
         else:
-            log("Claude API", WARN, "returned None (no API key or API error) — will use fallback scorer")
+            log("Claude API", WARN, f"returned None (API key missing or error) in {elapsed}s — fallback scorer used")
     except Exception as e:
         log("Claude API", FAIL, str(e))
 
+# ─── 9. Scoring + filter ─────────────────────────────────────────────────────
+async def check_scoring():
+    print("\n[9] Scoring + Signal Filter (simulated signal)")
+    try:
+        from mcp_server.tools.trade_scorer import score_signal
+        from mcp_server.config import get_settings
+        # Simulate a strong signal
+        enriched = {
+            "direction": "LONG", "htf_bias": "BULLISH", "signal_type": "OB_ENTRY",
+            "fvg_present": True, "htf_matches_direction": True, "in_discount": True,
+            "liquidity_swept": True, "is_killzone": True, "ltf_choch": True,
+            "session": "LONDON", "options_confirm": False, "near_max_pain": False,
+            "volume_ratio": 2.0, "in_lunch": False, "trap_present": False,
+            "trap_direction": "", "segment": "FOREX", "close": 1.0850,
+            "ob_already_touched": False,
+        }
+        result = score_signal(enriched)
+        log("score_signal (strong LONG)", PASS if result.passed else WARN,
+            f"score={result.score} grade={result.grade} passed={result.passed} "
+            f"breakdown={result.breakdown}")
+        settings = get_settings()
+        log("min_confluence_score", PASS, f"{settings.min_confluence_score}")
+    except Exception as e:
+        log("scoring", FAIL, str(e))
 
-# ─────────────────────────────────────────────────────────────────────
-# 8. Telegram bot connectivity
-# ─────────────────────────────────────────────────────────────────────
-
+# ─── 10. Telegram bot ────────────────────────────────────────────────────────
 async def check_telegram():
-    print("\n[8] Telegram Bot")
+    print("\n[10] Telegram Bot")
     try:
         import httpx
         from mcp_server.config import get_settings
         s = get_settings()
-        token = s.telegram_bot_token
-        url = f"https://api.telegram.org/bot{token}/getMe"
         async with httpx.AsyncClient(timeout=10.0) as c:
-            r = await c.get(url)
+            r = await c.get(f"https://api.telegram.org/bot{s.telegram_bot_token}/getMe")
         if r.status_code == 200:
             bot = r.json().get("result", {})
             log("Telegram getMe", PASS, f"@{bot.get('username')} ({bot.get('first_name')})")
@@ -281,116 +251,56 @@ async def check_telegram():
     except Exception as e:
         log("Telegram bot", FAIL, str(e))
 
-
-async def check_telegram_sendable():
-    """Send a diagnostic test message to the configured chat."""
-    print("\n[8b] Telegram Send Test")
+# ─── 11. Trade calculator ────────────────────────────────────────────────────
+async def check_calculator():
+    print("\n[11] Trade Calculator")
     try:
-        import httpx
-        from mcp_server.config import get_settings
-        s = get_settings()
-        url = f"https://api.telegram.org/bot{s.telegram_bot_token}/sendMessage"
-        async with httpx.AsyncClient(timeout=10.0) as c:
-            r = await c.post(url, json={
-                "chat_id": s.telegram_chat_id,
-                "text": "🔧 Diagnostic test — pipeline check running. Ignore this message.",
-                "parse_mode": "HTML",
-            })
-        if r.status_code == 200:
-            log("Telegram send message", PASS, f"chat_id={s.telegram_chat_id}")
+        from mcp_server.tools.trade_calculator import calculate_position
+        enriched = {
+            "instrument": "FOREX:EURUSD", "base_symbol": "EURUSD",
+            "segment": "FOREX", "direction": "LONG",
+            "signal_type": "OB_ENTRY", "close": 1.0850,
+            "ob_high": 1.0865, "ob_low": 1.0840,
+            "fvg_high": 1.0860, "fvg_low": 1.0845,
+            "score": 82, "grade": "A",
+        }
+        result = calculate_position(enriched, account_size=100000, risk_percent=1.0)
+        if result.valid:
+            log("calculate_position (EURUSD LONG)", PASS,
+                f"entry={result.entry} sl={result.sl} tp1={result.tp1} "
+                f"rr={result.rr_ratio:.1f} lots={result.lots} net_tp1={result.net_at_tp1:.0f}")
         else:
-            log("Telegram send message", FAIL, f"HTTP {r.status_code}: {r.text[:120]}")
+            log("calculate_position (EURUSD LONG)", WARN, f"rejected: {result.reject_reason}")
     except Exception as e:
-        log("Telegram send message", FAIL, str(e))
+        log("trade calculator", FAIL, str(e))
 
-
-# ─────────────────────────────────────────────────────────────────────
-# 9. Market scanner — does it actually fetch NSE data?
-# ─────────────────────────────────────────────────────────────────────
-
-async def check_market_scanner_nse():
-    print("\n[9] Market Scanner — NSE OHLCV fetch")
-    try:
-        import inspect
-        import mcp_server.tools.market_scanner as ms_module
-        src = inspect.getsource(ms_module.MarketScanner.scan_instrument)
-        has_nse_path = 'exchange=="NSE"' in src or "exchange == 'NSE'" in src or "exchange==\"NSE\"" in src
-        if has_nse_path:
-            log("NSE OHLCV in scanner", PASS, "NSE fetch path (Yahoo Finance fallback) present")
-        else:
-            log(
-                "NSE OHLCV in scanner",
-                FAIL,
-                "scan_instrument only fetches ohlcv for exchange=BINANCE — "
-                "NSE instruments (NIFTY, BANKNIFTY, FNO) always return None"
-            )
-        # Also test Yahoo Finance fetch directly
-        result = await ms_module.fetch_nse_ohlcv("NIFTY", "15m", 50)
-        if result and len(result.get("closes", [])) >= 20:
-            log("Yahoo Finance NIFTY 15m", PASS, f"{len(result['closes'])} bars, last close={result['closes'][-1]:.0f}")
-        else:
-            log("Yahoo Finance NIFTY 15m", WARN, "returned no data (may be outside market hours)")
-    except Exception as e:
-        log("scanner code check", FAIL, str(e))
-
-
-# ─────────────────────────────────────────────────────────────────────
-# 10. Live engine NSEFetcher headers
-# ─────────────────────────────────────────────────────────────────────
-
-async def check_live_engine_headers():
-    print("\n[10] Live Engine — NSEFetcher headers")
-    try:
-        import inspect
-        import mcp_server.tools.live_data_engine as lde_module
-        src = inspect.getsource(lde_module.NSEFetcher._h)
-        if "sec-ch-ua" in src or "sec-fetch" in src:
-            log("NSEFetcher modern headers", PASS)
-        else:
-            log(
-                "NSEFetcher modern headers",
-                FAIL,
-                "live_data_engine.NSEFetcher._h() uses minimal headers "
-                "(no sec-ch-ua / sec-fetch-*) — separate from feeds.py fix, will still 403"
-            )
-    except Exception as e:
-        log("live engine header check", FAIL, str(e))
-
-
-# ─────────────────────────────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────────────────────────────
-
+# ─── Main ─────────────────────────────────────────────────────────────────────
 async def main():
-    print("=" * 60)
+    print("=" * 65)
     print("  Trading Bot — End-to-End Pipeline Diagnostic")
-    print("=" * 60)
-
+    print("=" * 65)
     await check_config()
-    await check_nse_cookies()
-    await check_nse_prices()
-    await check_nse_option_chain()
     await check_binance()
-    await check_institutional_analysis()
-    await check_claude_api()
+    await check_yahoo_forex()
+    await check_yahoo_nse()
+    await check_nse_live()
+    await check_institutional()
+    await check_engine_process()
+    await check_claude()
+    await check_scoring()
     await check_telegram()
-    await check_telegram_sendable()
-    await check_market_scanner_nse()
-    await check_live_engine_headers()
-
-    print("\n" + "=" * 60)
-    passed  = sum(1 for _, s, _ in results if s == PASS)
-    failed  = sum(1 for _, s, _ in results if s == FAIL)
-    warned  = sum(1 for _, s, _ in results if s in (WARN, SKIP))
+    await check_calculator()
+    print("\n" + "=" * 65)
+    passed = sum(1 for _,s,_ in results if s==PASS)
+    failed = sum(1 for _,s,_ in results if s==FAIL)
+    warned = sum(1 for _,s,_ in results if s in (WARN,SKIP))
     print(f"  RESULT: {passed} passed  |  {failed} failed  |  {warned} warnings")
-    print("=" * 60)
-
+    print("=" * 65)
     if failed:
         print("\nFailed checks:")
-        for stage, status, detail in results:
+        for stage,status,detail in results:
             if status == FAIL:
                 print(f"  ❌ {stage}: {detail}")
-
 
 if __name__ == "__main__":
     asyncio.run(main())
