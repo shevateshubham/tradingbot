@@ -343,8 +343,37 @@ if judas_signal
          style=trend_up ? label.style_label_up : label.style_label_down,
          color=color.new(color.orange, 30), textcolor=color.white, size=size.small)
 
+// ── Last signal tracker (for dashboard row) ───────────────────────
+var string last_sig_dir  = "—"
+var string last_sig_time = "—"
+var int    last_sig_bar  = na
+
+if aplus_long
+    last_sig_dir  := "▲ LONG"
+    last_sig_time := str.format("{0,date,HH:mm}", time)
+    last_sig_bar  := bar_index
+if aplus_short
+    last_sig_dir  := "▼ SHORT"
+    last_sig_time := str.format("{0,date,HH:mm}", time)
+    last_sig_bar  := bar_index
+
+// ── FVG unmitigated tracker ───────────────────────────────────────
+var int fvg_count = 0
+var bool fvg_mitigated = false
+
+if bull_fvg or bear_fvg
+    fvg_count      := fvg_count + 1
+    fvg_mitigated  := false
+
+// Approximate mitigation: price returned to FVG area
+if not na(fvg_box)
+    top_val = box.get_top(fvg_box)
+    bot_val = box.get_bottom(fvg_box)
+    if close >= bot_val and close <= top_val
+        fvg_mitigated := true
+
 // ── Dashboard Table ───────────────────────────────────────────────
-var table dash = table.new(position.top_right, 2, 7,
+var table dash = table.new(position.top_right, 2, 11,
      bgcolor=color.new(color.black, 70), border_color=color.new(color.gray, 50),
      border_width=1, frame_color=color.new(color.gray,30), frame_width=1)
 
@@ -360,17 +389,35 @@ if barstate.islast
     table.cell(dash, 0, 1, "Daily Bias", text_color=color.gray, text_size=size.small)
     table.cell(dash, 1, 1, bias_str, text_color=bias_col, text_size=size.small)
 
-    // Killzone
-    kz_str = in_killzone ? "✅ ACTIVE" : "—"
-    kz_col = in_killzone ? color.yellow : color.gray
+    // Killzone + countdown
+    h_ist = hour(time, "Asia/Kolkata")
+    m_ist = minute(time, "Asia/Kolkata")
+    mins_now = h_ist * 60 + m_ist
+    kz_opens = array.from(2*60+0, 9*60+15-30, 13*60+0, 18*60+0)
+    kz_closes = array.from(2*60+60, 9*60+15+30, 13*60+60, 18*60+60)
+    mins_to_kz = 9999
+    for ki = 0 to array.size(kz_opens) - 1
+        kz_s = array.get(kz_opens, ki)
+        kz_e = array.get(kz_closes, ki)
+        if mins_now >= kz_s and mins_now <= kz_e
+            mins_to_kz := 0
+        else if kz_s > mins_now
+            mins_to_kz := math.min(mins_to_kz, kz_s - mins_now)
+    kz_str = in_killzone ? "✅ ACTIVE" :
+             mins_to_kz < 9999 ? "in " + str.tostring(mins_to_kz) + "m" : "—"
+    kz_col = in_killzone ? color.yellow : mins_to_kz <= 15 ? color.orange : color.gray
     table.cell(dash, 0, 2, "Killzone", text_color=color.gray, text_size=size.small)
     table.cell(dash, 1, 2, kz_str, text_color=kz_col, text_size=size.small)
 
-    // OB status
-    ob_str = (not na(bull_ob_high) ? "Bull OB " + str.tostring(math.round(bull_ob_high)) : "") +
-             (not na(bear_ob_low)  ? " Bear OB " + str.tostring(math.round(bear_ob_high)) : "")
+    // OB status — show active bull/bear OBs with mitigation state
+    bull_ob_active = not na(bull_ob_high)
+    bear_ob_active = not na(bear_ob_high)
+    ob_bull_str = bull_ob_active ? "Bull✓" : ""
+    ob_bear_str = bear_ob_active ? " Bear✓" : ""
+    ob_count_str = (not bull_ob_active and not bear_ob_active) ? "None" : ob_bull_str + ob_bear_str
+    ob_col = (bull_ob_active or bear_ob_active) ? color.white : color.gray
     table.cell(dash, 0, 3, "Order Blocks", text_color=color.gray, text_size=size.small)
-    table.cell(dash, 1, 3, ob_str == "" ? "None" : ob_str, text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 3, ob_count_str, text_color=ob_col, text_size=size.small)
 
     // Liquidity
     liq_str = (not na(bsl_level) ? "BSL " + str.tostring(math.round(bsl_level)) + " " : "") +
@@ -389,6 +436,89 @@ if barstate.islast
     trap_col = bull_trap or bear_trap ? color.orange : color.gray
     table.cell(dash, 0, 6, "Traps", text_color=color.gray, text_size=size.small)
     table.cell(dash, 1, 6, trap_str, text_color=trap_col, text_size=size.small)
+
+    // FVG status
+    fvg_str = fvg_count == 0 ? "None" :
+              fvg_mitigated ? str.tostring(fvg_count) + " (filled)" :
+              str.tostring(fvg_count) + " unmitigated"
+    fvg_col = fvg_count > 0 and not fvg_mitigated ? color.teal : color.gray
+    table.cell(dash, 0, 7, "FVG", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 7, fvg_str, text_color=fvg_col, text_size=size.small)
+
+    // Last A+ signal
+    bars_ago = na(last_sig_bar) ? na : bar_index - last_sig_bar
+    sig_age  = na(bars_ago) ? "" : " (" + str.tostring(bars_ago) + "b ago)"
+    last_sig_str = last_sig_dir + sig_age
+    last_sig_col = str.contains(last_sig_dir, "LONG") ? color.green :
+                   str.contains(last_sig_dir, "SHORT") ? color.red : color.gray
+    table.cell(dash, 0, 8, "Last A+ Signal", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 8, last_sig_str == "—" ? "—" : last_sig_str, text_color=last_sig_col, text_size=size.small)
+
+    // Last signal time
+    table.cell(dash, 0, 9, "Signal Time", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 9, last_sig_time, text_color=color.white, text_size=size.small)
+
+    // Volume ratio
+    vol_ratio_cur = volume / (math.sum(volume, 20) / 20)
+    vol_str = str.tostring(math.round(vol_ratio_cur, 1)) + "x avg"
+    vol_col = vol_ratio_cur >= 1.5 ? color.yellow : color.gray
+    table.cell(dash, 0, 10, "Volume", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 10, vol_str, text_color=vol_col, text_size=size.small)
+
+// ── Entry / SL / TP Line Drawings ────────────────────────────────
+// Drawn when an A+ setup fires. Uses OB levels for SL reference.
+// Lines extend 60 bars to the right and are replaced on each new signal.
+
+var line entry_line = na
+var line sl_line    = na
+var line tp1_line   = na
+var line tp2_line   = na
+var line tp3_line   = na
+
+if i_show_levels and (aplus_long or aplus_short)
+    // Remove prior lines
+    if not na(entry_line) then line.delete(entry_line)
+    if not na(sl_line)    then line.delete(sl_line)
+    if not na(tp1_line)   then line.delete(tp1_line)
+    if not na(tp2_line)   then line.delete(tp2_line)
+    if not na(tp3_line)   then line.delete(tp3_line)
+
+    sig_entry = close
+    // SL anchored to the relevant OB edge; fallback to 0.5% if OB not set
+    sig_sl = aplus_long  ? (not na(bull_ob_low)  ? bull_ob_low  : sig_entry * 0.995) :
+                           (not na(bear_ob_high) ? bear_ob_high : sig_entry * 1.005)
+    sig_risk = math.abs(sig_entry - sig_sl)
+    sig_tp1  = aplus_long ? sig_entry + sig_risk     : sig_entry - sig_risk
+    sig_tp2  = aplus_long ? sig_entry + sig_risk * 2 : sig_entry - sig_risk * 2
+    sig_tp3  = aplus_long ? sig_entry + sig_risk * 3 : sig_entry - sig_risk * 3
+    ext      = bar_index + 60
+
+    entry_line := line.new(bar_index, sig_entry, ext, sig_entry,
+         color=color.blue,  style=line.style_solid,  width=2)
+    sl_line    := line.new(bar_index, sig_sl,    ext, sig_sl,
+         color=color.red,   style=line.style_dashed, width=1)
+    tp1_line   := line.new(bar_index, sig_tp1,   ext, sig_tp1,
+         color=color.green, style=line.style_dashed, width=1)
+    tp2_line   := line.new(bar_index, sig_tp2,   ext, sig_tp2,
+         color=color.green, style=line.style_dashed, width=1)
+    tp3_line   := line.new(bar_index, sig_tp3,   ext, sig_tp3,
+         color=color.green, style=line.style_dashed, width=1)
+
+    label.new(ext, sig_entry, "Entry",
+         style=label.style_label_left, color=color.new(color.blue,60),
+         textcolor=color.white, size=size.tiny)
+    label.new(ext, sig_sl, "SL",
+         style=label.style_label_left, color=color.new(color.red,60),
+         textcolor=color.white, size=size.tiny)
+    label.new(ext, sig_tp1, "TP1",
+         style=label.style_label_left, color=color.new(color.green,60),
+         textcolor=color.white, size=size.tiny)
+    label.new(ext, sig_tp2, "TP2",
+         style=label.style_label_left, color=color.new(color.green,60),
+         textcolor=color.white, size=size.tiny)
+    label.new(ext, sig_tp3, "TP3",
+         style=label.style_label_left, color=color.new(color.green,60),
+         textcolor=color.white, size=size.tiny)
 
 // ── Alert Conditions ──────────────────────────────────────────────
 // Set webhook URL in TradingView alert dialog (Notifications tab).

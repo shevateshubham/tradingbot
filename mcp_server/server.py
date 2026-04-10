@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from typing import Optional
 
 import pytz
@@ -30,6 +30,7 @@ from mcp_server.config import (
     WEEKLY_ANALYSIS_DAY, WEEKLY_ANALYSIS_TIME,
     PRICE_CHECK_INTERVAL_SECONDS,
 )
+from mcp_server.tools.trade_calculator import LOT_SIZES
 from mcp_server.models.database import (
     init_db, close_db, get_session_factory,
     get_or_create_user, increment_signals_today,
@@ -227,6 +228,115 @@ async def run_signal_pipeline(raw_body: dict) -> dict:
     }
 
 
+# ── Engine signal pipeline (live/evening/scanner → filter → DB → Telegram) ──
+
+async def run_engine_signal_pipeline(signal_data: dict) -> None:
+    """
+    Run an engine-generated signal through filters, save to DB, and send.
+    Engines already compute score/grade/entry/SL/TP so we skip webhook/scoring stages.
+    """
+    settings = get_settings()
+    chat_id  = settings.telegram_chat_id
+    factory  = get_session_factory()
+
+    score = float(signal_data.get("score") or 0)
+    grade = str(signal_data.get("grade") or "C")
+
+    # ── Preference filter (segment enabled, score, daily limit, etc.) ─
+    async with factory() as session:
+        filter_result = await apply_filters(session, chat_id, signal_data, score=score, grade=grade)
+        await session.commit()
+
+    if not filter_result.passed:
+        if filter_result.send_limit_warning:
+            user = filter_result.user
+            await send_daily_limit_warning(_telegram_app.bot, chat_id, user.max_signals_per_day if user else 5)
+        if filter_result.reason and "consecutive_loss_protection" in filter_result.reason:
+            if chat_id not in _consecutive_loss_warned:
+                _consecutive_loss_warned.add(chat_id)
+                await send_consecutive_loss_alert(_telegram_app.bot, chat_id, 3)
+        logger.info(f"Engine signal filtered: {signal_data.get('instrument')} — {filter_result.reason}")
+        return
+
+    # ── Paper mode ────────────────────────────────────────────────
+    async with factory() as session:
+        user = filter_result.user or await get_or_create_user(session, chat_id)
+        paper_mode = user.paper_mode
+        user_id    = user.user_id
+        await session.commit()
+
+    signal_data["paper_mode"] = paper_mode
+
+    # ── Send to Telegram ──────────────────────────────────────────
+    message_id = await send_signal_to_telegram(_telegram_app.bot, chat_id, signal_data)
+
+    # ── Save to DB ────────────────────────────────────────────────
+    async with factory() as session:
+        sig = Signal(
+            chat_id=chat_id,
+            instrument=signal_data.get("instrument"),
+            segment=signal_data.get("segment"),
+            direction=signal_data.get("direction"),
+            timeframe=str(signal_data.get("timeframe", "15")),
+            session=signal_data.get("session"),
+            killzone_active=signal_data.get("is_killzone", False),
+            setup_type=signal_data.get("setup_type"),
+            score=int(score),
+            grade=grade,
+            entry=signal_data.get("entry"),
+            sl=signal_data.get("sl"),
+            tp1=signal_data.get("tp1"),
+            tp2=signal_data.get("tp2"),
+            tp3=signal_data.get("tp3"),
+            sl_points=signal_data.get("sl_points"),
+            sl_percent=signal_data.get("sl_percent"),
+            lots=signal_data.get("lots", 1),
+            charges=signal_data.get("charges"),
+            net_at_tp1=signal_data.get("net_at_tp1"),
+            confluences=signal_data.get("confluences", {}),
+            htf_bias=signal_data.get("htf_bias"),
+            liquidity_swept=signal_data.get("liquidity_swept", False),
+            fvg_present=signal_data.get("fvg_present", False),
+            volume_ratio=signal_data.get("volume_ratio"),
+            options_pcr=signal_data.get("options_pcr"),
+            options_oi_bias=signal_data.get("options_oi_bias"),
+            max_pain=signal_data.get("max_pain"),
+            gex=signal_data.get("gex"),
+            status="open",
+            paper_mode=paper_mode,
+            telegram_message_id=message_id,
+        )
+        session.add(sig)
+        await increment_signals_today(session, user_id)
+        await session.commit()
+
+    logger.info(
+        f"Engine signal sent: {signal_data.get('instrument')} "
+        f"{signal_data.get('direction')} score={score:.0f} grade={grade}"
+    )
+
+
+# ── Market scanner task ───────────────────────────────────────────
+
+async def run_scanner_cycle() -> None:
+    """Run one full market scan and pipe results through the engine signal pipeline."""
+    try:
+        from mcp_server.tools.market_scanner import get_scanner
+        settings = get_settings()
+        scanner = get_scanner()
+        # Get enabled markets from main user preferences
+        factory = get_session_factory()
+        async with factory() as session:
+            user = await get_or_create_user(session, settings.telegram_chat_id)
+            enabled = user.markets_enabled or ["INDICES", "CRYPTO"]
+            await session.commit()
+        signals = await scanner.run_full_scan(enabled)
+        for sig in signals:
+            await run_engine_signal_pipeline(sig)
+    except Exception as e:
+        logger.error(f"Scanner cycle error: {e}", exc_info=True)
+
+
 # ── Price tracker ─────────────────────────────────────────────────
 
 async def check_open_signals_prices() -> None:
@@ -284,9 +394,13 @@ async def check_open_signals_prices() -> None:
                     exit_price = sig.tp1
 
             if outcome and exit_price:
-                # Calculate P&L
+                # Calculate P&L using segment-aware lot size
                 pts = abs(exit_price - sig.entry)
-                lot_size = 50  # Default
+                base_sym = (sig.instrument or "").split(":")[-1].upper()
+                lot_size = LOT_SIZES.get(base_sym, LOT_SIZES.get("DEFAULT", 1))
+                # INDICES / FNO default to 50 if not in map
+                if sig.segment in ("INDICES", "INDIAN_FNO") and lot_size == 1:
+                    lot_size = 50
                 is_win = outcome.startswith("TP")
                 gross = pts * (sig.lots or 1) * lot_size
                 net_pnl = (gross - (sig.charges or 0)) if is_win else -(pts * (sig.lots or 1) * lot_size) - (sig.charges or 0)
@@ -303,7 +417,7 @@ async def check_open_signals_prices() -> None:
                         db_sig.exit_price = exit_price
                         db_sig.actual_rr = pts / sig.sl_points if sig.sl_points else 0
                         db_sig.net_pnl = round(net_pnl, 2)
-                        db_sig.closed_at = datetime.utcnow()
+                        db_sig.closed_at = datetime.now(timezone.utc).replace(tzinfo=None)
                         await session.commit()
 
                 # Send outcome notification
@@ -325,7 +439,7 @@ async def send_session_summary(session_name: str) -> None:
     factory = get_session_factory()
 
     try:
-        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start = datetime.now(timezone.utc).replace(tzinfo=None).replace(hour=0, minute=0, second=0, microsecond=0)
         async with factory() as session:
             result = await session.execute(
                 select(Signal).where(
@@ -357,8 +471,17 @@ async def run_scheduled_weekly_analysis() -> None:
     settings = get_settings()
     factory = get_session_factory()
     logger.info("Running scheduled weekly analysis...")
+    from mcp_server.tools.performance import (
+        run_weekly_analysis, check_post_deployment_performance,
+    )
+    # First: evaluate post-deployment performance for prior changes
     async with factory() as session:
-        from mcp_server.tools.performance import run_weekly_analysis
+        await check_post_deployment_performance(
+            session, _telegram_app.bot, settings.telegram_chat_id
+        )
+        await session.commit()
+    # Then: run new weekly analysis
+    async with factory() as session:
         await run_weekly_analysis(session, _telegram_app.bot, settings.telegram_chat_id)
         await session.commit()
 
@@ -434,10 +557,19 @@ async def lifespan(app: FastAPI):
         id="reset_loss_warning",
     )
 
+    # Market scanner: every 30 minutes
+    _scheduler.add_job(
+        lambda: asyncio.create_task(run_scanner_cycle()),
+        "interval",
+        minutes=30,
+        id="market_scanner",
+        max_instances=1,
+    )
+
     _scheduler.start()
     asyncio.get_event_loop().call_later(10, lambda: asyncio.create_task(start_live_engine()))
     asyncio.get_event_loop().call_later(15, lambda: asyncio.create_task(start_evening_engine()))
-    logger.info("Scheduler started: price_tracker, india_summary, global_summary, weekly_analysis")
+    logger.info("Scheduler started: price_tracker, india_summary, global_summary, weekly_analysis, market_scanner")
 
     yield  # ── Server running ───────────────────────────────────────
 
@@ -471,7 +603,7 @@ async def health_check():
         "status": "ok",
         "mode": "paper" if settings.paper_mode else "live",
         "environment": settings.railway_environment,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
     }
 
 
@@ -542,11 +674,7 @@ async def start_live_engine():
         engine = get_live_engine()
         async def on_signal(signal_data):
             try:
-                await send_signal_to_telegram(
-                    _telegram_app.bot,
-                    settings.telegram_chat_id,
-                    signal_data
-                )
+                await run_engine_signal_pipeline(signal_data)
             except Exception as e:
                 logger.error(f"Signal send error: {e}")
         engine.set_signal_callback(on_signal)
@@ -565,11 +693,7 @@ async def start_evening_engine():
         engine = get_evening_engine()
         async def on_signal(signal_data):
             try:
-                await send_signal_to_telegram(
-                    _telegram_app.bot,
-                    settings.telegram_chat_id,
-                    signal_data
-                )
+                await run_engine_signal_pipeline(signal_data)
             except Exception as e:
                 logger.error(f"Evening signal send error: {e}")
         engine.set_signal_callback(on_signal)

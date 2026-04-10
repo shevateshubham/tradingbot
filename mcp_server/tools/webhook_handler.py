@@ -7,10 +7,10 @@ to the processing pipeline. All validation errors are logged.
 import hashlib
 import hmac
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Tuple
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator, model_validator, ValidationInfo
 
 from mcp_server.config import get_settings
 from mcp_server.tools.segment_detector import detect_segment, get_base_symbol
@@ -48,29 +48,36 @@ class WebhookPayload(BaseModel):
     close:           float           = 0.0
     high:            Optional[float] = None
     low:             Optional[float] = None
+    spread:          Optional[float] = None           # bid-ask spread from Pine Script
     timestamp:       str             = ""
 
-    @validator("direction")
+    @field_validator("direction")
+    @classmethod
     def normalize_direction(cls, v: str) -> str:
         return v.upper().strip()
 
-    @validator("signal_type")
+    @field_validator("signal_type")
+    @classmethod
     def normalize_signal_type(cls, v: str) -> str:
         return v.upper().strip()
 
-    @validator("htf_bias")
+    @field_validator("htf_bias")
+    @classmethod
     def normalize_htf_bias(cls, v: str) -> str:
         return v.upper().strip()
 
-    @validator("ob_mid", always=True)
-    def calculate_ob_mid(cls, v: float, values: dict) -> float:
+    @field_validator("ob_mid", mode="before")
+    @classmethod
+    def calculate_ob_mid(cls, v: float, info: ValidationInfo) -> float:
         """Auto-calculate OB midpoint if not provided."""
-        if v == 0.0 and values.get("ob_high", 0) and values.get("ob_low", 0):
-            return (values["ob_high"] + values["ob_low"]) / 2
-        return v
+        if (v == 0.0 or v is None) and info.data:
+            ob_high = info.data.get("ob_high", 0) or 0
+            ob_low  = info.data.get("ob_low", 0)  or 0
+            if ob_high and ob_low:
+                return (ob_high + ob_low) / 2
+        return v or 0.0
 
-    class Config:
-        extra = "allow"  # Allow extra fields from TradingView without error
+    model_config = {"extra": "allow"}  # Allow extra fields from TradingView without error
 
 
 class NormalizedPayload(BaseModel):
@@ -195,7 +202,7 @@ async def handle_webhook(raw_body: dict) -> Tuple[Optional[NormalizedPayload], s
     base_symbol = get_base_symbol(payload.instrument, payload.exchange)
 
     # ── Build normalized payload ──────────────────────────────────
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     is_killzone = _is_in_killzone(payload.session, now)
 
     normalized = NormalizedPayload(

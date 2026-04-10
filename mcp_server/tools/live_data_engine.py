@@ -1,6 +1,6 @@
 import asyncio,logging
 from collections import deque
-from datetime import datetime,date,timedelta
+from datetime import datetime,date,timedelta,timezone
 from typing import Optional,Dict,List
 import httpx,pytz
 logger=logging.getLogger(__name__)
@@ -46,7 +46,7 @@ class CandleBuilder:
 class NSEFetcher:
     def __init__(self):self._ck={};self._cts=None;self._ttl=1800
     async def _refresh(self):
-        now=datetime.utcnow()
+        now=datetime.now(timezone.utc).replace(tzinfo=None)
         if self._cts and (now-self._cts).total_seconds()<self._ttl and self._ck:return self._ck
         try:
             async with httpx.AsyncClient(timeout=10.0,headers={"User-Agent":"Mozilla/5.0"}) as c:
@@ -72,7 +72,7 @@ class NSEFetcher:
             async with httpx.AsyncClient(timeout=15.0,cookies=ck,headers=self._h()) as c:
                 r=await c.get(NSE_OC_INDEX,params={"symbol":sym})
                 if r.status_code==200:return r.json()
-        except:pass
+        except Exception as e: logger.warning(f"OC fetch {sym}: {e}")
         return None
 
 class LiveDataEngine:
@@ -80,7 +80,7 @@ class LiveDataEngine:
         self._f=NSEFetcher();self._running=False
         self._b={i["symbol"]:{tf:CandleBuilder(i["symbol"],tf) for tf in TIMEFRAMES} for i in INDICES}
         self._hist={};self._oc={};self._oc_ts={};self._oc_ttl=180
-        self._prices={};self._cb=None
+        self._prices={};self._cb=None;self._last_sigs={}
 
     def set_signal_callback(self,cb):self._cb=cb
 
@@ -96,7 +96,7 @@ class LiveDataEngine:
         return ohm-hm if hm<ohm else 24*60-hm+ohm
 
     async def _get_oc(self,sym):
-        now=datetime.utcnow();ts=self._oc_ts.get(sym)
+        now=datetime.now(timezone.utc).replace(tzinfo=None);ts=self._oc_ts.get(sym)
         if ts and (now-ts).total_seconds()<self._oc_ttl:return self._oc.get(sym)
         raw=await self._f.fetch_oc(sym)
         if raw:self._oc[sym]=raw;self._oc_ts[sym]=now
@@ -123,28 +123,34 @@ class LiveDataEngine:
                                     self._hist[sym]["opens"].append(o);self._hist[sym]["highs"].append(h)
                                     self._hist[sym]["lows"].append(l);self._hist[sym]["closes"].append(cl)
                                     self._hist[sym]["volumes"].append(1000.0)
-                            except:pass
-                        logger.info(f"Preloaded {sym}: {len(self._hist.get(sym,{}).get(chr(99)+chr(108)+chr(111)+chr(115)+chr(101)+chr(115),[]))} candles")
+                            except Exception: pass
+                        logger.info(f"Preloaded {sym}: {len(self._hist.get(sym,{}).get('closes',[]))} candles")
             except Exception as e:logger.warning(f"Preload failed {sym}: {e}")
             await asyncio.sleep(0.5)
 
     async def _process(self,sym,tf,inst_info):
+        key=f"{sym}:{tf}"
+        if key in self._last_sigs and (datetime.now(timezone.utc).replace(tzinfo=None)-self._last_sigs[key]).total_seconds()<3600:return
+        logger.info(f"Analyzing {sym} {tf}m ({self._b[sym][tf].count} candles)...")
         try:
             from mcp_server.tools.institutional_detector import analyze_institutional_activity
             from mcp_server.tools.decision_engine import score_decision
             from mcp_server.tools.options_analysis import analyze_option_chain,is_near_max_pain
+            from mcp_server.tools.claude_analyzer import evaluate_setup
             ohlcv=self._b[sym][tf].get_ohlcv();hist=self._hist.get(sym,{})
             m={k:(hist.get(k,[])+ohlcv.get(k,[]))[-200:] for k in ("opens","highs","lows","closes","volumes")}
             if len(m["closes"])<30:return
             o=m["opens"];h=m["highs"];l=m["lows"];c=m["closes"];v=m["volumes"];cur=c[-1]
-            def htf(cl):
-                if len(cl)<20:return "NEUTRAL"
-                mid=len(cl)//2;hh=max(cl[mid:])>max(cl[:mid]);hl=min(cl[mid:])>min(cl[:mid])
-                lh=max(cl[mid:])<max(cl[:mid]);ll=min(cl[mid:])<min(cl[:mid])
-                return "BULLISH" if hh and hl else "BEARISH" if lh and ll else "NEUTRAL"
-            weekly=htf(c[-100:] if len(c)>=100 else c);daily=htf(c[-50:] if len(c)>=50 else c);h4=htf(c[-20:] if len(c)>=20 else c)
-            inst=analyze_institutional_activity(o,h,l,c,v,min(l[-20:]),max(h[-20:]),weekly)
-            if inst.institutional_bias=="NEUTRAL" and inst.total_score<10:return
+            from mcp_server.tools.institutional_detector import detect_htf_structure
+            def _slice(arr,n):return arr[-n:] if len(arr)>=n else arr
+            weekly=detect_htf_structure(_slice(c,100),_slice(h,100),_slice(l,100))
+            daily=detect_htf_structure(_slice(c,50),_slice(h,50),_slice(l,50))
+            h4=detect_htf_structure(_slice(c,20),_slice(h,20),_slice(l,20))
+            # Use bars 4-25 ago as swing reference so recent sweeps can be detected
+            _sl=min(l[-25:-4]) if len(l)>=25 else (min(l[:-3]) if len(l)>3 else min(l))
+            _sh=max(h[-25:-4]) if len(h)>=25 else (max(h[:-3]) if len(h)>3 else max(h))
+            inst=analyze_institutional_activity(o,h,l,c,v,_sl,_sh,weekly)
+            if inst.institutional_bias=="NEUTRAL":return
             sd="LONG" if inst.institutional_bias=="BULLISH" else "SHORT"
             od={};raw_o=await self._get_oc(sym)
             if raw_o:od=analyze_option_chain(raw_o,cur)
@@ -159,34 +165,51 @@ class LiveDataEngine:
             lunch=12*60<=hm<=13*60+30
             eq=(max(h[-50:])+min(l[-50:]))/2 if len(h)>=50 else (max(h[-20:])+min(l[-20:]))/2
             poi="BREAKER" if inst.breaker_block else "OB_FVG" if inst.propulsion_block else "OB"
-            dec=score_decision(weekly_trend=weekly,daily_structure=daily,h4_flow=h4,signal_direction=sd,institutional=inst,poi_type=poi,trap_confirmed=trap,ltf_choch=ltf,volume_spike=vs,in_discount=cur<eq,pcr_confirms=(sd=="LONG" and dir_o=="BULLISH") or (sd=="SHORT" and dir_o=="BEARISH"),near_max_pain=mp and is_near_max_pain(cur,mp),gex_supports=od.get("gex",0)>0 if sd=="LONG" else od.get("gex",0)<0,options_conflict=(sd=="LONG" and dir_o=="BEARISH") or (sd=="SHORT" and dir_o=="BULLISH"),is_index=True,is_killzone=kz,is_session_open=kz,htf_ob_confluence=inst.breaker_block,first_touch_ob=not inst.mitigation_block,ob_already_touched=inst.mitigation_block,is_lunch_hour=lunch,low_volume_session=not kz and hm>15*60,segment="INDICES")
-            if not dec.send:return
+            # ── Claude-powered decision ────────────────────────────────
+            claude=await evaluate_setup(symbol=sym,segment="INDICES",timeframe=tf,current_price=cur,closes=c,highs=h,lows=l,volumes=v,inst_bias=inst.institutional_bias,inst_score=inst.total_score,inst_evidence=inst.evidence,liquidity_event=inst.liquidity_event.value,breaker_block=inst.breaker_block,propulsion_block=inst.propulsion_block,mitigation_block=inst.mitigation_block,wyckoff_phase=inst.wyckoff_phase.value,weekly_trend=weekly,daily_structure=daily,h4_flow=h4,in_discount=cur<eq,is_killzone=kz,ltf_choch=ltf,volume_spike=vs,options_data=od or None)
+            if claude is not None:
+                if not claude.send:logger.info(f"Claude rejected {sym} {tf}m: {claude.risk_factors}");return
+                sd=claude.direction;sig_grade=claude.grade;sig_score=claude.confidence
+                sig_narrative=claude.narrative+" | ".join(claude.key_reasons[:2])
+                sig_evidence=claude.key_reasons+inst.evidence[:2]
+            else:
+                # Fallback to scoring engine
+                dec=score_decision(weekly_trend=weekly,daily_structure=daily,h4_flow=h4,signal_direction=sd,institutional=inst,poi_type=poi,trap_confirmed=trap,ltf_choch=ltf,volume_spike=vs,in_discount=cur<eq,pcr_confirms=(sd=="LONG" and dir_o=="BULLISH") or (sd=="SHORT" and dir_o=="BEARISH"),near_max_pain=mp and is_near_max_pain(cur,mp),gex_supports=od.get("gex",0)>0 if sd=="LONG" else od.get("gex",0)<0,options_conflict=(sd=="LONG" and dir_o=="BEARISH") or (sd=="SHORT" and dir_o=="BULLISH"),is_index=True,is_killzone=kz,is_session_open=(not lunch),htf_ob_confluence=inst.breaker_block,first_touch_ob=not inst.mitigation_block,ob_already_touched=inst.mitigation_block,is_lunch_hour=lunch,low_volume_session=not kz and hm>15*60,segment="INDICES")
+                if not dec.send:return
+                sig_grade=dec.grade;sig_score=dec.score;sig_narrative=dec.narrative;sig_evidence=dec.evidence
             os=None
             if od:
                 from mcp_server.tools.options_strategy import select_strategy
                 try:
                     dte=max(1,(3-date.today().weekday())%7 or 7)
                     os=select_strategy(underlying_price=cur,max_pain=mp or cur,pcr=pcr or 1.0,ce_walls=od.get("ce_walls",[]),pe_walls=od.get("pe_walls",[]),days_to_expiry=dte,instrument=sym,directional_bias=inst.institutional_bias)
-                except:pass
+                except Exception as e: logger.debug(f"Options strategy {sym}: {e}")
             sp=cur*0.004;entry=cur;sl=cur-sp if sd=="LONG" else cur+sp
             tp1=cur+sp if sd=="LONG" else cur-sp;tp2=cur+sp*2 if sd=="LONG" else cur-sp*2;tp3=cur+sp*3 if sd=="LONG" else cur-sp*3
             sl_pts=abs(entry-sl);lv=inst_info["lot_size"]
-            sig={"instrument":f"NSE:{sym}","base_symbol":sym,"exchange":"NSE","segment":"INDICES","direction":sd,"timeframe":str(tf),"signal_type":"INSTITUTIONAL","score":dec.score,"grade":dec.grade,"entry":round(entry,2),"sl":round(sl,2),"tp1":round(tp1,2),"tp2":round(tp2,2),"tp3":round(tp3,2),"sl_points":round(sl_pts,2),"sl_percent":round(sl_pts/entry*100,3),"lots":1,"lot_size":lv,"charges":850.0,"net_at_tp1":round(sl_pts*lv-850,2),"htf_bias":inst.institutional_bias,"in_discount":cur<eq,"liquidity_swept":inst.liquidity_event.value!="NONE","fvg_present":inst.propulsion_block,"volume_ratio":round(v[-1]/avg_v,2),"session":"INDIA","trap_present":trap,"is_killzone":kz,"ltf_choch":ltf,"options_pcr":pcr,"options_oi_bias":dir_o,"max_pain":mp,"gex":od.get("gex"),"setup_type":f"{inst.wyckoff_phase.value}|{inst.liquidity_event.value}","narrative":dec.narrative,"htf_timeframe":"4H","confluences":{"htf_bias":inst.institutional_bias,"poi_type":poi,"zone_type":"Discount" if cur<eq else "Premium","liquidity_swept":inst.liquidity_event.value!="NONE","killzone":kz,"ltf_choch":ltf},"institutional_evidence":inst.evidence,"decision_evidence":dec.evidence,"options_signal":os}
-            logger.info(f"SIGNAL: NSE:{sym} {sd} score={dec.score} grade={dec.grade} tf={tf}m")
+            sig={"instrument":f"NSE:{sym}","base_symbol":sym,"exchange":"NSE","segment":"INDICES","direction":sd,"timeframe":str(tf),"signal_type":"INSTITUTIONAL","score":sig_score,"grade":sig_grade,"entry":round(entry,2),"sl":round(sl,2),"tp1":round(tp1,2),"tp2":round(tp2,2),"tp3":round(tp3,2),"sl_points":round(sl_pts,2),"sl_percent":round(sl_pts/entry*100,3),"lots":1,"lot_size":lv,"charges":850.0,"net_at_tp1":round(sl_pts*lv-850,2),"htf_bias":inst.institutional_bias,"in_discount":cur<eq,"liquidity_swept":inst.liquidity_event.value!="NONE","fvg_present":inst.propulsion_block,"volume_ratio":round(v[-1]/avg_v,2),"session":"INDIA","trap_present":trap,"is_killzone":kz,"ltf_choch":ltf,"options_pcr":pcr,"options_oi_bias":dir_o,"max_pain":mp,"gex":od.get("gex"),"setup_type":f"{inst.wyckoff_phase.value}|{inst.liquidity_event.value}","narrative":sig_narrative,"htf_timeframe":"4H","confluences":{"htf_bias":inst.institutional_bias,"poi_type":poi,"zone_type":"Discount" if cur<eq else "Premium","liquidity_swept":inst.liquidity_event.value!="NONE","killzone":kz,"ltf_choch":ltf},"institutional_evidence":inst.evidence,"decision_evidence":sig_evidence,"options_signal":os}
+            self._last_sigs[key]=datetime.now(timezone.utc).replace(tzinfo=None)
+            logger.info(f"SIGNAL: NSE:{sym} {sd} score={sig_score:.0f} grade={sig_grade} tf={tf}m (claude={'yes' if claude else 'fallback'})")
             if self._cb:await self._cb(sig)
         except Exception as e:logger.error(f"Process {sym} {tf}m: {e}",exc_info=True)
 
     async def _tick(self):
         prices=await self._f.fetch_indices()
-        if not prices:return
+        if not prices:
+            logger.warning("Live tick: no data from NSE")
+            return
         now=datetime.now(IST)
+        price_summary=", ".join(f"{sym}={prices[sym]['price']:.0f}" for sym in ("NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY") if sym in prices)
+        candle_counts={sym:{tf:self._b[sym][tf].count for tf in TIMEFRAMES} for inst in INDICES for sym in [inst["symbol"]]}
+        logger.info(f"Live tick @ {now.strftime('%H:%M:%S')} IST | {price_summary} | candles={candle_counts}")
         for inst in INDICES:
             sym=inst["symbol"];data=prices.get(sym)
             if not data or not data.get("price"):continue
             p=data["price"];vol=data.get("volume",1000);self._prices[sym]=p
             for tf in TIMEFRAMES:
                 closed=self._b[sym][tf].update(p,now,vol)
-                if closed and self._b[sym][tf].count>=30:
+                hist_count=len(self._hist.get(sym,{}).get("closes",[]))
+                if closed and (self._b[sym][tf].count+hist_count)>=30:
                     await self._process(sym,tf,inst)
 
     async def run(self):

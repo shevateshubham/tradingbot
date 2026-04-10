@@ -138,22 +138,6 @@ def format_signal_message(signal_data: dict) -> str:
     def chk(val: bool) -> str:
         return "✅" if val else "❌"
 
-    # Institutional evidence
-    inst_evidence = d.get("institutional_evidence", [])
-    inst_section = ""
-    if inst_evidence:
-        inst_lines = "\n".join([f"  • {esc(str(e))}" for e in inst_evidence[:4]])
-        inst_section = f"🏛 *INSTITUTIONAL EVIDENCE*\n{inst_lines}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-
-    # Options strategy section
-    opts_sig = d.get("options_signal")
-    opts_strategy_section = ""
-    if opts_sig and hasattr(opts_sig, "valid") and opts_sig.valid:
-        from mcp_server.tools.options_strategy import format_options_signal
-        opts_str = format_options_signal(opts_sig, lots=1)
-        if opts_str:
-            opts_strategy_section = esc(opts_str) + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-
     # Institutional evidence section
     inst_evidence = d.get("institutional_evidence", [])
     inst_section = ""
@@ -258,8 +242,6 @@ def format_signal_message(signal_data: dict) -> str:
         f"🕐 Signal Time    : {signal_time}\n"
         f"⏳ Expires By     : {expiry}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"{inst_section}"
-        f"{opts_strategy_section}"
         f"{inst_section}"
         f"{opts_strategy_section}"
         f"📌 {narrative}\n"
@@ -429,6 +411,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 @authorized_only
 async def cmd_active(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from mcp_server.resources.feeds import fetch_current_price
     factory = get_session_factory()
     async with factory() as session:
         chat_id = str(update.effective_chat.id)
@@ -444,12 +427,36 @@ async def cmd_active(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         lines = [f"📊 *OPEN SIGNALS \\({len(open_signals)}\\)*\n"]
         for sig in open_signals:
             direction_emoji = "🟢" if sig.direction == "LONG" else "🔴"
-            age_hours = int((datetime.utcnow() - sig.created_at).total_seconds() // 3600) if sig.created_at else 0
+            age_hours = int((datetime.now(timezone.utc).replace(tzinfo=None) - sig.created_at).total_seconds() // 3600) if sig.created_at else 0
+            # Fetch live price
+            try:
+                live_price = await fetch_current_price(sig.instrument or "", sig.segment or "")
+            except Exception:
+                live_price = None
+
+            entry = sig.entry or 0
+            sl = sig.sl or 0
+            tp1 = sig.tp1 or 0
+
+            if live_price and entry:
+                pnl_pts = (live_price - entry) if sig.direction == "LONG" else (entry - live_price)
+                sl_dist = abs(live_price - sl) if sl else 0
+                tp_dist = abs(tp1 - live_price) if tp1 else 0
+                status = "In profit" if pnl_pts > 0 else "In drawdown"
+                live_line = (
+                    f"  📍 Live: {esc(f'{live_price:,.5f}')} "
+                    f"\\({esc(f'{pnl_pts:+,.5f}')} from entry\\)\n"
+                    f"  ⚡ {esc(status)} \\| {esc(f'{sl_dist:,.5f}')} to SL \\| {esc(f'{tp_dist:,.5f}')} to TP1\n"
+                )
+            else:
+                live_line = f"  📍 Live: N/A\n"
+
             lines.append(
                 f"{direction_emoji} *{esc(sig.instrument or '')}* — {esc(sig.grade or 'A')}\n"
-                f"  Entry: {esc(f'{sig.entry:,.2f}' if sig.entry else 'N/A')} "
-                f"| SL: {esc(f'{sig.sl:,.2f}' if sig.sl else 'N/A')} "
-                f"| TP1: {esc(f'{sig.tp1:,.2f}' if sig.tp1 else 'N/A')}\n"
+                f"  Entry: {esc(f'{entry:,.5f}')} "
+                f"| SL: {esc(f'{sl:,.5f}')} "
+                f"| TP1: {esc(f'{tp1:,.5f}')}\n"
+                f"{live_line}"
                 f"  Opened {age_hours}h ago\n"
             )
 
@@ -743,6 +750,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 "📄 *Paper Mode Activated*\n\nSignals are informational only\\.",
                 parse_mode="MarkdownV2",
             )
+
+        # Approve/Reject improvement PR inline buttons
+        elif data.startswith("approve_pr_"):
+            pr_number = int(data.split("_")[-1])
+            from mcp_server.tools.performance import approve_improvement_pr
+            await approve_improvement_pr(update, context, session, pr_number)
+
+        elif data.startswith("reject_pr_"):
+            pr_number = int(data.split("_")[-1])
+            from mcp_server.tools.performance import reject_improvement_pr
+            await reject_improvement_pr(update, context, session, pr_number)
 
         elif data == "cmd_cancel" or data == "cmd_rollback":
             await query.answer()

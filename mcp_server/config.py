@@ -7,7 +7,7 @@ import os
 import logging
 from typing import Optional
 from pydantic_settings import BaseSettings
-from pydantic import Field, validator
+from pydantic import Field, field_validator
 
 
 class Settings(BaseSettings):
@@ -47,7 +47,8 @@ class Settings(BaseSettings):
     min_rr_ratio: float = Field(default=2.0, env="MIN_RR_RATIO")
     paper_mode: bool = Field(default=True, env="PAPER_MODE")
 
-    @validator("database_url", pre=True)
+    @field_validator("database_url", mode="before")
+    @classmethod
     def fix_postgres_url(cls, v: str) -> str:
         """Railway provides postgres:// — SQLAlchemy needs postgresql+asyncpg://"""
         if v.startswith("postgres://"):
@@ -56,10 +57,11 @@ class Settings(BaseSettings):
             v = v.replace("postgresql://", "postgresql+asyncpg://", 1)
         return v
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "case_sensitive": False,
+    }
 
 
 # ── Scoring weights (matches ABSOLUTE CONSTRAINTS spec) ───────────
@@ -281,5 +283,3 @@ QF_LABELS = {
     "A_AND_APLUS": "A and A+ Setups max 5/day",
     "ALL_SCORED": "All Scored Setups up to 8/day",
 }
-# redeploy
-# force redeploy v2
