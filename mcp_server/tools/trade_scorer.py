@@ -191,7 +191,7 @@ def score_signal(enriched: dict) -> ScoreResult:
 
     # HTF conflict with Daily structure
     if htf_conflict and htf_bias != "NEUTRAL":
-        logger.info(f"Hard discard: HTF conflict — direction={direction} htf_bias={htf_bias}")
+        logger.info(f"SCORE [DISCARD] score={score} grade={grade} — HTF conflict: direction={direction} htf_bias={htf_bias}")
         return ScoreResult(
             score=score, grade=grade, passed=False,
             reject_reason=f"against_daily_structure:direction={direction} htf={htf_bias}",
@@ -202,7 +202,7 @@ def score_signal(enriched: dict) -> ScoreResult:
     # since GRADE_THRESHOLDS["A"] == min_confluence_score == 72)
     min_score = settings.min_confluence_score
     if score < min_score:
-        logger.info(f"Hard discard: score {score} < min {min_score} (grade {grade})")
+        logger.info(f"SCORE [DISCARD] score={score} grade={grade} — below min {min_score}")
         return ScoreResult(
             score=score, grade=grade, passed=False,
             reject_reason=f"score_too_low:{score}<{min_score}",
@@ -211,8 +211,9 @@ def score_signal(enriched: dict) -> ScoreResult:
 
     # RR check is done in calculator — if RR < min, calculator rejects
 
+    factors = " | ".join(f"{k}:{v:+d}" for k, v in breakdown.items())
     logger.info(
-        f"Score: {score}/100 grade={grade} breakdown={breakdown}"
+        f"SCORE [{grade}] {score}/100 — {factors}"
     )
     return ScoreResult(
         score=score, grade=grade, passed=True,

@@ -128,7 +128,7 @@ async def apply_filters(
             logger.info(f"Auto-pause expired for chat_id={chat_id}")
         else:
             reason = "signals_paused"
-            logger.debug(f"Discarding {instrument}: {reason}")
+            logger.info(f"FILTER [gate1/paused] {instrument} score={score} grade={grade} — {reason}")
             await _log_discard(session, payload, reason, chat_id, score, grade)
             return FilterResult(False, reason, user)
 
@@ -137,7 +137,7 @@ async def apply_filters(
     enabled_markets = user.markets_enabled or []
     if enabled_markets and segment and segment not in enabled_markets:
         reason = f"segment_not_enabled:{segment}"
-        logger.debug(f"Discarding {instrument}: {reason}")
+        logger.info(f"FILTER [gate2/segment] {instrument} score={score} grade={grade} — {reason}")
         await _log_discard(session, payload, reason, chat_id, score, grade)
         return FilterResult(False, reason, user)
 
@@ -145,7 +145,7 @@ async def apply_filters(
     tf_mode = user.timeframe_mode or "INTRADAY"
     if tf_mode != "ALL" and not _timeframe_allowed(tf_raw, tf_mode):
         reason = f"timeframe_mismatch:tf={tf_raw} mode={tf_mode}"
-        logger.debug(f"Discarding {instrument}: {reason}")
+        logger.info(f"FILTER [gate3/timeframe] {instrument} score={score} grade={grade} — {reason}")
         await _log_discard(session, payload, reason, chat_id, score, grade)
         return FilterResult(False, reason, user)
 
@@ -156,7 +156,7 @@ async def apply_filters(
 
     if score is not None and score < min_score:
         reason = f"score_below_threshold:score={score} min={min_score}"
-        logger.debug(f"Discarding {instrument}: {reason}")
+        logger.info(f"FILTER [gate4/score] {instrument} score={score} grade={grade} — below min {min_score}")
         await _log_discard(session, payload, reason, chat_id, score, grade)
         return FilterResult(False, reason, user)
 
@@ -165,7 +165,7 @@ async def apply_filters(
     entry = payload.get("entry") or payload.get("ob_mid") or payload.get("close") or 0
     if spread and entry and (spread / entry * 100) > MAX_SPREAD_PERCENT:
         reason = f"spread_too_wide:{spread/entry*100:.3f}%>{MAX_SPREAD_PERCENT}%"
-        logger.debug(f"Discarding {instrument}: {reason}")
+        logger.info(f"FILTER [gate4b/spread] {instrument} score={score} grade={grade} — {reason}")
         await _log_discard(session, payload, reason, chat_id, score, grade)
         return FilterResult(False, reason, user)
 
@@ -175,7 +175,7 @@ async def apply_filters(
 
     if sent_today >= max_today:
         reason = f"daily_limit_reached:{sent_today}/{max_today}"
-        logger.info(f"Daily limit reached for chat_id={chat_id}: {sent_today}/{max_today}")
+        logger.info(f"FILTER [gate5/daily_limit] {instrument} score={score} grade={grade} — {sent_today}/{max_today} signals sent today")
         await _log_discard(session, payload, reason, chat_id, score, grade)
         # Send the warning only exactly when limit is first hit
         send_warning = (sent_today == max_today)
@@ -186,7 +186,7 @@ async def apply_filters(
     open_count = await count_open_trades(session, chat_id)
     if open_count >= settings.max_active_trades:
         reason = f"max_active_trades:{open_count}/{settings.max_active_trades}"
-        logger.info(f"Max active trades reached for chat_id={chat_id}: {open_count}")
+        logger.info(f"FILTER [gate6/max_trades] {instrument} score={score} grade={grade} — {open_count} trades open")
         await _log_discard(session, payload, reason, chat_id, score, grade)
         return FilterResult(False, reason, user)
 
@@ -212,7 +212,7 @@ async def apply_filters(
         conflict = next((s for s in correlated if s in open_syms_upper), None)
         if conflict:
             reason = f"correlated_instrument_active:{conflict}"
-            logger.info(f"Discarding {instrument}: {reason}")
+            logger.info(f"FILTER [gate6b/correlated] {instrument} score={score} grade={grade} — {conflict} already open")
             await _log_discard(session, payload, reason, chat_id, score, grade)
             return FilterResult(False, reason, user)
 
@@ -220,7 +220,7 @@ async def apply_filters(
     recent_losses = await get_recent_losses(session, chat_id, hours=24)
     if recent_losses >= MAX_CONSECUTIVE_LOSSES:
         reason = f"consecutive_loss_protection:{recent_losses}_losses"
-        logger.warning(f"Consecutive loss protection triggered for chat_id={chat_id}")
+        logger.warning(f"FILTER [gate7/loss_protect] {instrument} score={score} grade={grade} — {recent_losses} losses in 24h, pausing signals")
         # Auto-pause for configured hours
         if not user.signals_paused:
             user.signals_paused = True
@@ -232,8 +232,8 @@ async def apply_filters(
 
     # ── All checks passed ─────────────────────────────────────────
     logger.info(
-        f"Signal PASSED filters: {instrument} {payload.get('direction')} "
-        f"tf={tf_raw} segment={segment} score={score}"
+        f"FILTER [PASSED] {instrument} {payload.get('direction')} "
+        f"score={score} grade={grade} tf={tf_raw} segment={segment}"
     )
     return FilterResult(True, None, user)
 
