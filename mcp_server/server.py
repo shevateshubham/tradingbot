@@ -557,18 +557,20 @@ async def lifespan(app: FastAPI):
         id="reset_loss_warning",
     )
 
-    # Market scanner: every 30 minutes
+    # Market scanner: every 30 minutes — run immediately on startup too
     _scheduler.add_job(
         lambda: asyncio.create_task(run_scanner_cycle()),
         "interval",
         minutes=30,
         id="market_scanner",
         max_instances=1,
+        next_run_time=datetime.now(IST),
     )
 
     _scheduler.start()
-    asyncio.get_event_loop().call_later(10, lambda: asyncio.create_task(start_live_engine()))
-    asyncio.get_event_loop().call_later(15, lambda: asyncio.create_task(start_evening_engine()))
+    loop = asyncio.get_running_loop()
+    loop.call_later(10, lambda: asyncio.create_task(start_live_engine()))
+    loop.call_later(15, lambda: asyncio.create_task(start_evening_engine()))
     logger.info("Scheduler started: price_tracker, india_summary, global_summary, weekly_analysis, market_scanner")
 
     yield  # ── Server running ───────────────────────────────────────
@@ -659,9 +661,32 @@ if __name__ == "__main__":
         "mcp_server.server:app",
         host="0.0.0.0",
         port=port,
-        log_level="info",
         access_log=True,
         reload=False,
+        log_config={
+            "version": 1,
+            "disable_existing_loggers": False,
+            "formatters": {
+                "default": {
+                    "format": "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+                    "datefmt": "%Y-%m-%d %H:%M:%S",
+                }
+            },
+            "handlers": {
+                "default": {
+                    "formatter": "default",
+                    "class": "logging.StreamHandler",
+                    "stream": "ext://sys.stdout",
+                }
+            },
+            "loggers": {
+                "uvicorn":        {"handlers": ["default"], "level": "INFO", "propagate": False},
+                "uvicorn.error":  {"handlers": ["default"], "level": "INFO", "propagate": False},
+                "uvicorn.access": {"handlers": ["default"], "level": "INFO", "propagate": False},
+            },
+            # Root at INFO so all mcp_server.* loggers are visible
+            "root": {"level": "INFO", "handlers": ["default"]},
+        },
     )
 
 
