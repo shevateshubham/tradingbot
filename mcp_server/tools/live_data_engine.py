@@ -15,7 +15,8 @@ NSE_HOME="https://www.nseindia.com"
 NSE_INDEX_URL="https://www.nseindia.com/api/allIndices"
 NSE_HIST_URL="https://www.nseindia.com/api/historical/indicesHistory"
 NSE_OC_INDEX="https://www.nseindia.com/api/option-chain-indices"
-TIMEFRAMES=[1,5,15,60]
+# Only 15m and 60m — pass the INTRADAY timeframe filter in signal_filter.py
+TIMEFRAMES=[15,60]
 # Yahoo Finance symbols and per-TF settings for NSE index preload
 YF_NSE_SYM={"NIFTY":"%5ENSEI","BANKNIFTY":"%5ENSEBANK","FINNIFTY":"%5ENSEFIN","MIDCPNIFTY":"%5ENSEMIDCAP"}
 TF_YF_INTERVAL={1:"1m",5:"5m",15:"15m",60:"60m"}
@@ -83,8 +84,6 @@ class LiveDataEngine:
     def __init__(self):
         self._f=NSEFetcher();self._running=False
         self._b={i["symbol"]:{tf:CandleBuilder(i["symbol"],tf) for tf in TIMEFRAMES} for i in INDICES}
-        # Per-timeframe historical data: _hist_tf[symbol][tf] = {opens,highs,lows,closes,volumes}
-        self._hist_tf={i["symbol"]:{tf:{} for tf in TIMEFRAMES} for i in INDICES}
         self._oc={};self._oc_ts={};self._oc_ttl=180
         self._prices={};self._cb=None;self._last_sigs={}
 
@@ -129,34 +128,20 @@ class LiveDataEngine:
                 return {"opens":list(o2),"highs":list(h2),"lows":list(l2),"closes":list(c2),"volumes":list(v2)}
         except Exception as e: logger.debug(f"YF hist {sym} {tf}m: {e}"); return None
 
-    async def _preload_historical(self):
-        """Preload per-TF historical bars so analysis fires on first candle close."""
-        logger.info("Preloading per-TF historical data for NSE indices...")
-        loaded=0
-        for inst in INDICES:
-            sym=inst["symbol"]
-            for tf in TIMEFRAMES:
-                h=await self._fetch_hist_yf(sym,tf)
-                if h:
-                    self._hist_tf[sym][tf]=h;loaded+=1
-                    logger.info(f"Hist preloaded: {sym} {tf}m — {len(h['closes'])} bars")
-                else:
-                    logger.warning(f"Hist preload failed: {sym} {tf}m — will rely on live candles")
-                await asyncio.sleep(0.4)
-        logger.info(f"Historical preload complete: {loaded}/{len(INDICES)*len(TIMEFRAMES)} TF datasets loaded")
-
     async def _process(self,sym,tf,inst_info):
         key=f"{sym}:{tf}"
         if key in self._last_sigs and (datetime.now(timezone.utc).replace(tzinfo=None)-self._last_sigs[key]).total_seconds()<3600:return
-        logger.info(f"Analyzing {sym} {tf}m ({self._b[sym][tf].count} live + {len(self._hist_tf.get(sym,{}).get(tf,{}).get('closes',[]))} hist candles)...")
         try:
             from mcp_server.tools.institutional_detector import analyze_institutional_activity
             from mcp_server.tools.decision_engine import score_decision
             from mcp_server.tools.options_analysis import analyze_option_chain,is_near_max_pain
             from mcp_server.tools.claude_analyzer import evaluate_setup
-            ohlcv=self._b[sym][tf].get_ohlcv();hist=self._hist_tf.get(sym,{}).get(tf,{})
-            m={k:(hist.get(k,[])+ohlcv.get(k,[]))[-200:] for k in ("opens","highs","lows","closes","volumes")}
-            if len(m["closes"])<30:return
+            # Fetch bars live on-demand — no warmup period, no preload required
+            m=await self._fetch_hist_yf(sym,tf)
+            if not m or len(m.get("closes",[]))<20:
+                logger.debug(f"No data for {sym} {tf}m — skipping")
+                return
+            logger.info(f"Analyzing {sym} {tf}m ({len(m['closes'])} bars)...")
             o=m["opens"];h=m["highs"];l=m["lows"];c=m["closes"];v=m["volumes"];cur=c[-1]
             from mcp_server.tools.institutional_detector import detect_htf_structure
             def _slice(arr,n):return arr[-n:] if len(arr)>=n else arr
@@ -225,14 +210,12 @@ class LiveDataEngine:
             p=data["price"];vol=data.get("volume",1000);self._prices[sym]=p
             for tf in TIMEFRAMES:
                 closed=self._b[sym][tf].update(p,now,vol)
-                hist_count=len(self._hist_tf.get(sym,{}).get(tf,{}).get("closes",[]))
-                if closed and (self._b[sym][tf].count+hist_count)>=30:
+                if closed:
                     await self._process(sym,tf,inst)
 
     async def run(self):
         self._running=True
-        logger.info("Live engine started")
-        await self._preload_historical()
+        logger.info("Live engine started — bars fetched live on-demand")
         while self._running:
             try:
                 if self.is_open():
