@@ -28,42 +28,63 @@ NSE_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
+        "Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
     "Referer": "https://www.nseindia.com/option-chain",
+    "Connection": "keep-alive",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
+    "X-Requested-With": "XMLHttpRequest",
 }
 
 
 async def _refresh_nse_cookies() -> Dict[str, str]:
     """
-    Hit the NSE homepage to get fresh session cookies.
+    Hit the NSE homepage + option-chain page to get fresh session cookies.
     NSE rejects API calls without these cookies.
     Rotated every NSE_COOKIE_REFRESH_MINUTES minutes.
+
+    Note: NSE may return 403 on the homepage itself; we do NOT raise on
+    that status because the response still carries Set-Cookie headers that
+    satisfy subsequent API calls.
     """
     global _nse_cookies, _nse_cookie_fetched_at
 
     try:
         async with httpx.AsyncClient(
-            timeout=15.0,
+            timeout=20.0,
             follow_redirects=True,
             headers=NSE_HEADERS,
         ) as client:
-            # Hit homepage first to get cookies
+            # Seed 1: homepage — collect cookies without raising on 4xx
             resp = await client.get(NSE_BASE_URL)
-            resp.raise_for_status()
-            cookies = dict(resp.cookies)
+            cookies: Dict[str, str] = dict(resp.cookies)
 
-            # Also hit option-chain page for any additional cookies
-            await asyncio.sleep(0.5)
-            await client.get(f"{NSE_BASE_URL}/option-chain")
+            if resp.status_code not in (200, 403):
+                logger.warning(f"NSE homepage returned unexpected status {resp.status_code}")
 
-            cookies.update(dict(resp.cookies))
-            _nse_cookies = cookies
-            _nse_cookie_fetched_at = time.time()
-            logger.info(f"NSE cookies refreshed: {list(cookies.keys())}")
-            return cookies
+            # Seed 2: option-chain page for additional session tokens
+            await asyncio.sleep(1.0)
+            resp2 = await client.get(f"{NSE_BASE_URL}/option-chain")
+            cookies.update(dict(resp2.cookies))
+
+            if not cookies:
+                logger.warning("NSE cookie refresh returned no cookies — WAF may be active")
+            else:
+                _nse_cookies = cookies
+                _nse_cookie_fetched_at = time.time()
+                logger.info(f"NSE cookies refreshed: {list(cookies.keys())}")
+
+            return _nse_cookies  # Return whatever we have (fresh or prior stale)
 
     except Exception as e:
         logger.error(f"NSE cookie refresh failed: {e}")
@@ -106,9 +127,9 @@ async def fetch_nse_option_chain(symbol: str, is_index: bool = True) -> Optional
             ) as client:
                 resp = await client.get(url)
 
-                # NSE returns 401 when cookies are stale
-                if resp.status_code == 401:
-                    logger.info("NSE cookies stale, refreshing...")
+                # NSE returns 401 or 403 when cookies are stale / WAF blocked
+                if resp.status_code in (401, 403):
+                    logger.info(f"NSE returned {resp.status_code}, refreshing cookies...")
                     cookies = await _refresh_nse_cookies()
                     continue
 
