@@ -215,7 +215,7 @@ def calculate_charges(
         taker_fee = config.get("taker_fee_per_side", 0.0004)
         charges = turnover * taker_fee * 2  # Both sides
 
-    elif segment in ("GLOBAL_INDICES", "CURRENCY_FOREX"):
+    elif segment == "GLOBAL_INDICES":
         # Commission per lot + spread
         commission = config.get("commission_per_lot", 3.5) * lots * 2
         spread_cost = turnover * config.get("spread_percent", 0.0002)

@@ -21,6 +21,12 @@ TIMEFRAMES=[15,60]
 YF_NSE_SYM={"NIFTY":"%5ENSEI","BANKNIFTY":"%5ENSEBANK","FINNIFTY":"%5ENSEFIN","MIDCPNIFTY":"%5ENSEMIDCAP"}
 TF_YF_INTERVAL={1:"1m",5:"5m",15:"15m",60:"60m"}
 TF_YF_RANGE={1:"1d",5:"5d",15:"5d",60:"30d"}
+def _calc_atr(highs,lows,closes,period=14):
+    """Average True Range — volatility measure for institutional SL sizing."""
+    if len(closes)<2: return closes[-1]*0.002 if closes else 0.0
+    trs=[max(highs[i]-lows[i],abs(highs[i]-closes[i-1]),abs(lows[i]-closes[i-1])) for i in range(1,len(closes))]
+    n=min(period,len(trs))
+    return sum(trs[-n:])/n if n>0 else closes[-1]*0.002
 
 class Candle:
     __slots__=["ts","open","high","low","close","volume","closed"]
@@ -186,12 +192,19 @@ class LiveDataEngine:
                     dte=max(1,(3-date.today().weekday())%7 or 7)
                     os=select_strategy(underlying_price=cur,max_pain=mp or cur,pcr=pcr or 1.0,ce_walls=od.get("ce_walls",[]),pe_walls=od.get("pe_walls",[]),days_to_expiry=dte,instrument=sym,directional_bias=inst.institutional_bias)
                 except Exception as e: logger.debug(f"Options strategy {sym}: {e}")
-            sp=cur*0.004;entry=cur;sl=cur-sp if sd=="LONG" else cur+sp
-            tp1=cur+sp if sd=="LONG" else cur-sp;tp2=cur+sp*2 if sd=="LONG" else cur-sp*2;tp3=cur+sp*3 if sd=="LONG" else cur-sp*3
+            # ATR-based SL/TP — volatility-adjusted, institutional grade
+            atr=_calc_atr(h,l,c)
+            sl_dist=max(atr*1.5, cur*0.002)  # 1.5×ATR, floor 0.2% of price
+            entry=cur
+            sl=round(cur-sl_dist if sd=="LONG" else cur+sl_dist, 2)
+            tp1=round(cur+sl_dist if sd=="LONG" else cur-sl_dist, 2)
+            tp2=round(cur+sl_dist*2 if sd=="LONG" else cur-sl_dist*2, 2)
+            tp3=round(cur+sl_dist*3 if sd=="LONG" else cur-sl_dist*3, 2)
             sl_pts=abs(entry-sl);lv=inst_info["lot_size"]
-            sig={"instrument":f"NSE:{sym}","base_symbol":sym,"exchange":"NSE","segment":"INDICES","direction":sd,"timeframe":str(tf),"signal_type":"INSTITUTIONAL","score":sig_score,"grade":sig_grade,"entry":round(entry,2),"sl":round(sl,2),"tp1":round(tp1,2),"tp2":round(tp2,2),"tp3":round(tp3,2),"sl_points":round(sl_pts,2),"sl_percent":round(sl_pts/entry*100,3),"lots":1,"lot_size":lv,"charges":850.0,"net_at_tp1":round(sl_pts*lv-850,2),"htf_bias":inst.institutional_bias,"in_discount":cur<eq,"liquidity_swept":inst.liquidity_event.value!="NONE","fvg_present":inst.propulsion_block,"volume_ratio":round(v[-1]/avg_v,2),"session":"INDIA","trap_present":trap,"is_killzone":kz,"ltf_choch":ltf,"options_pcr":pcr,"options_oi_bias":dir_o,"max_pain":mp,"gex":od.get("gex"),"setup_type":f"{inst.wyckoff_phase.value}|{inst.liquidity_event.value}","narrative":sig_narrative,"htf_timeframe":"4H","confluences":{"htf_bias":inst.institutional_bias,"poi_type":poi,"zone_type":"Discount" if cur<eq else "Premium","liquidity_swept":inst.liquidity_event.value!="NONE","killzone":kz,"ltf_choch":ltf},"institutional_evidence":inst.evidence,"decision_evidence":sig_evidence,"options_signal":os}
+            charges=round(sl_pts*lv*0.0003+850, 2)  # approx brokerage+STT+GST
+            sig={"instrument":f"NSE:{sym}","base_symbol":sym,"exchange":"NSE","segment":"INDICES","direction":sd,"timeframe":str(tf),"signal_type":"INSTITUTIONAL","score":sig_score,"grade":sig_grade,"entry":round(entry,2),"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sl_points":round(sl_pts,2),"sl_percent":round(sl_pts/entry*100,3),"rr_ratio":2.0,"lots":1,"lot_size":lv,"charges":charges,"net_at_tp1":round(sl_pts*lv-charges,2),"net_at_tp2":round(sl_pts*lv*2-charges,2),"net_at_tp3":round(sl_pts*lv*3-charges,2),"atr":round(atr,2),"htf_bias":inst.institutional_bias,"in_discount":cur<eq,"liquidity_swept":inst.liquidity_event.value!="NONE","fvg_present":inst.propulsion_block,"volume_ratio":round(v[-1]/avg_v,2),"session":"INDIA","trap_present":trap,"is_killzone":kz,"ltf_choch":ltf,"options_pcr":pcr,"options_oi_bias":dir_o,"max_pain":mp,"gex":od.get("gex"),"setup_type":f"{inst.wyckoff_phase.value}|{inst.liquidity_event.value}","narrative":sig_narrative,"htf_timeframe":"4H","confluences":{"htf_bias":inst.institutional_bias,"poi_type":poi,"zone_type":"Discount" if cur<eq else "Premium","liquidity_swept":inst.liquidity_event.value!="NONE","killzone":kz,"ltf_choch":ltf},"institutional_evidence":inst.evidence,"decision_evidence":sig_evidence,"options_signal":os}
             self._last_sigs[key]=datetime.now(timezone.utc).replace(tzinfo=None)
-            logger.info(f"SIGNAL: NSE:{sym} {sd} score={sig_score:.0f} grade={sig_grade} tf={tf}m (claude={'yes' if claude else 'fallback'})")
+            logger.info(f"SIGNAL: NSE:{sym} {sd} score={sig_score:.0f} grade={sig_grade} tf={tf}m entry={round(entry,2)} sl={sl} tp2={tp2} atr={round(atr,2)} (claude={'yes' if claude else 'fallback'})")
             if self._cb:await self._cb(sig)
         except Exception as e:logger.error(f"Process {sym} {tf}m: {e}",exc_info=True)
 
