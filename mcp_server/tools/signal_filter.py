@@ -5,7 +5,7 @@ Every rejection is logged to discarded_signals table for analysis.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Tuple
 
 import pytz
@@ -120,7 +120,7 @@ async def apply_filters(
     # ── 1. Signals paused ─────────────────────────────────────────
     if user.signals_paused:
         # Check if auto-pause time has expired
-        if user.pause_until and datetime.utcnow() > user.pause_until:
+        if user.pause_until and datetime.now(timezone.utc).replace(tzinfo=None) > user.pause_until:
             user.signals_paused = False
             user.pause_until = None
             await session.flush()
@@ -224,9 +224,9 @@ async def apply_filters(
         # Auto-pause for 24 hours
         if not user.signals_paused:
             user.signals_paused = True
-            user.pause_until = datetime.utcnow().replace(tzinfo=None)
+            user.pause_until = datetime.now(timezone.utc).replace(tzinfo=None).replace(tzinfo=None)
             from datetime import timedelta
-            user.pause_until = datetime.utcnow() + timedelta(hours=CONSECUTIVE_LOSS_PAUSE_HOURS)
+            user.pause_until = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=CONSECUTIVE_LOSS_PAUSE_HOURS)
             user.consecutive_losses = recent_losses
             await session.flush()
         await _log_discard(session, payload, reason, chat_id, score, grade)

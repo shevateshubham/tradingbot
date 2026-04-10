@@ -4,7 +4,7 @@ All tables defined here. Tables are created automatically on first startup.
 """
 
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import Optional, List, Any
 
 import asyncpg
@@ -336,7 +336,7 @@ async def count_open_trades(session: AsyncSession, chat_id: str) -> int:
 async def get_recent_losses(session: AsyncSession, chat_id: str, hours: int = 24) -> int:
     """Count consecutive losses in the last N hours."""
     from datetime import timedelta
-    cutoff = datetime.utcnow() - timedelta(hours=hours)
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=hours)
 
     result = await session.execute(
         select(Signal.outcome).where(
@@ -391,7 +391,7 @@ async def get_performance_stats(
     """Calculate win rate, RR, P&L for the last N days."""
     from datetime import timedelta
 
-    cutoff = datetime.utcnow() - timedelta(days=days)
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
     result = await session.execute(
         select(Signal).where(
             Signal.chat_id == str(chat_id),

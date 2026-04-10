@@ -1,6 +1,6 @@
 import asyncio,logging
 from collections import deque
-from datetime import datetime,date,timedelta
+from datetime import datetime,date,timedelta,timezone
 from typing import Optional,Dict,List
 import httpx,pytz
 logger=logging.getLogger(__name__)
@@ -46,7 +46,7 @@ class CandleBuilder:
 class NSEFetcher:
     def __init__(self):self._ck={};self._cts=None;self._ttl=1800
     async def _refresh(self):
-        now=datetime.utcnow()
+        now=datetime.now(timezone.utc).replace(tzinfo=None)
         if self._cts and (now-self._cts).total_seconds()<self._ttl and self._ck:return self._ck
         try:
             async with httpx.AsyncClient(timeout=10.0,headers={"User-Agent":"Mozilla/5.0"}) as c:
@@ -96,7 +96,7 @@ class LiveDataEngine:
         return ohm-hm if hm<ohm else 24*60-hm+ohm
 
     async def _get_oc(self,sym):
-        now=datetime.utcnow();ts=self._oc_ts.get(sym)
+        now=datetime.now(timezone.utc).replace(tzinfo=None);ts=self._oc_ts.get(sym)
         if ts and (now-ts).total_seconds()<self._oc_ttl:return self._oc.get(sym)
         raw=await self._f.fetch_oc(sym)
         if raw:self._oc[sym]=raw;self._oc_ts[sym]=now
@@ -130,7 +130,7 @@ class LiveDataEngine:
 
     async def _process(self,sym,tf,inst_info):
         key=f"{sym}:{tf}"
-        if key in self._last_sigs and (datetime.utcnow()-self._last_sigs[key]).total_seconds()<3600:return
+        if key in self._last_sigs and (datetime.now(timezone.utc).replace(tzinfo=None)-self._last_sigs[key]).total_seconds()<3600:return
         logger.info(f"Analyzing {sym} {tf}m ({self._b[sym][tf].count} candles)...")
         try:
             from mcp_server.tools.institutional_detector import analyze_institutional_activity
@@ -188,7 +188,7 @@ class LiveDataEngine:
             tp1=cur+sp if sd=="LONG" else cur-sp;tp2=cur+sp*2 if sd=="LONG" else cur-sp*2;tp3=cur+sp*3 if sd=="LONG" else cur-sp*3
             sl_pts=abs(entry-sl);lv=inst_info["lot_size"]
             sig={"instrument":f"NSE:{sym}","base_symbol":sym,"exchange":"NSE","segment":"INDICES","direction":sd,"timeframe":str(tf),"signal_type":"INSTITUTIONAL","score":sig_score,"grade":sig_grade,"entry":round(entry,2),"sl":round(sl,2),"tp1":round(tp1,2),"tp2":round(tp2,2),"tp3":round(tp3,2),"sl_points":round(sl_pts,2),"sl_percent":round(sl_pts/entry*100,3),"lots":1,"lot_size":lv,"charges":850.0,"net_at_tp1":round(sl_pts*lv-850,2),"htf_bias":inst.institutional_bias,"in_discount":cur<eq,"liquidity_swept":inst.liquidity_event.value!="NONE","fvg_present":inst.propulsion_block,"volume_ratio":round(v[-1]/avg_v,2),"session":"INDIA","trap_present":trap,"is_killzone":kz,"ltf_choch":ltf,"options_pcr":pcr,"options_oi_bias":dir_o,"max_pain":mp,"gex":od.get("gex"),"setup_type":f"{inst.wyckoff_phase.value}|{inst.liquidity_event.value}","narrative":sig_narrative,"htf_timeframe":"4H","confluences":{"htf_bias":inst.institutional_bias,"poi_type":poi,"zone_type":"Discount" if cur<eq else "Premium","liquidity_swept":inst.liquidity_event.value!="NONE","killzone":kz,"ltf_choch":ltf},"institutional_evidence":inst.evidence,"decision_evidence":sig_evidence,"options_signal":os}
-            self._last_sigs[key]=datetime.utcnow()
+            self._last_sigs[key]=datetime.now(timezone.utc).replace(tzinfo=None)
             logger.info(f"SIGNAL: NSE:{sym} {sd} score={sig_score:.0f} grade={sig_grade} tf={tf}m (claude={'yes' if claude else 'fallback'})")
             if self._cb:await self._cb(sig)
         except Exception as e:logger.error(f"Process {sym} {tf}m: {e}",exc_info=True)

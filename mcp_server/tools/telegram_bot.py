@@ -427,7 +427,7 @@ async def cmd_active(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         lines = [f"📊 *OPEN SIGNALS \\({len(open_signals)}\\)*\n"]
         for sig in open_signals:
             direction_emoji = "🟢" if sig.direction == "LONG" else "🔴"
-            age_hours = int((datetime.utcnow() - sig.created_at).total_seconds() // 3600) if sig.created_at else 0
+            age_hours = int((datetime.now(timezone.utc).replace(tzinfo=None) - sig.created_at).total_seconds() // 3600) if sig.created_at else 0
             # Fetch live price
             try:
                 live_price = await fetch_current_price(sig.instrument or "", sig.segment or "")

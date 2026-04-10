@@ -7,7 +7,7 @@ Also tracks post-change performance for auto-revert.
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 
 import httpx
@@ -263,7 +263,7 @@ async def _call_claude_api(trade_data: List[dict], current_params: dict) -> Opti
 
 async def _prepare_trade_data(session: AsyncSession, days: int = 30) -> List[dict]:
     """Fetch and serialize recent closed trades for Claude analysis."""
-    cutoff = datetime.utcnow() - timedelta(days=days)
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
     result = await session.execute(
         select(Signal).where(
             Signal.status == "closed",
@@ -302,7 +302,7 @@ async def _analyze_filter_effectiveness(session: AsyncSession, days: int = 30) -
     What percentage of discarded signals would have been losers?
     Shows how well the filter is working.
     """
-    cutoff = datetime.utcnow() - timedelta(days=days)
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
     result = await session.execute(
         select(DiscardedSignal).where(
             DiscardedSignal.created_at >= cutoff,
@@ -575,7 +575,7 @@ async def approve_improvement_pr(
         )
         record = result.scalar_one_or_none()
         if record:
-            record.approved_at = datetime.utcnow()
+            record.approved_at = datetime.now(timezone.utc).replace(tzinfo=None)
             await session.flush()
             await session.commit()
 
@@ -620,3 +620,179 @@ async def reject_improvement_pr(
         )
     else:
         await update.message.reply_text(f"Could not close PR #{pr_number}. Close it manually on GitHub.")
+
+
+# ── Post-deployment win rate monitoring ───────────────────────────
+
+async def check_post_deployment_performance(
+    session: AsyncSession,
+    bot,
+    chat_id: str,
+) -> None:
+    """
+    Post-deployment monitoring: check win rate 20 trades after an approved
+    parameter change. Called by the weekly Sunday scheduler.
+
+    - If win rate dropped > 10%: auto-create revert PR + send Telegram alert.
+    - Otherwise: record win_rate_after and send a "working" confirmation.
+    """
+    result = await session.execute(
+        select(ParameterHistory).where(
+            ParameterHistory.approved_at.isnot(None),
+            ParameterHistory.win_rate_after.is_(None),
+            ParameterHistory.reverted == False,  # noqa: E712
+        )
+    )
+    records = list(result.scalars().all())
+
+    if not records:
+        logger.info("Post-deploy check: no pending records to evaluate")
+        return
+
+    for record in records:
+        if not record.approved_at:
+            continue
+
+        # Count closed trades since the parameter was approved
+        trades_result = await session.execute(
+            select(Signal).where(
+                Signal.chat_id == str(chat_id),
+                Signal.status == "closed",
+                Signal.closed_at >= record.approved_at,
+            ).order_by(Signal.closed_at.asc())
+        )
+        trades_since = list(trades_result.scalars().all())
+
+        if len(trades_since) < 20:
+            logger.info(
+                f"Post-deploy check PR#{record.github_pr_number} "
+                f"({record.parameter_name}): {len(trades_since)}/20 trades — waiting"
+            )
+            continue
+
+        # Compute win rate from first 20 trades after approval
+        sample = trades_since[:20]
+        winners = sum(1 for t in sample if t.outcome and t.outcome.startswith("TP"))
+        win_rate_after = round(winners / 20 * 100, 1)
+        win_rate_before = record.win_rate_before or 50.0
+        drop = win_rate_before - win_rate_after
+
+        logger.info(
+            f"Post-deploy check PR#{record.github_pr_number} "
+            f"({record.parameter_name}): before={win_rate_before:.1f}% "
+            f"after={win_rate_after:.1f}% drop={drop:.1f}%"
+        )
+
+        if drop > 10.0:
+            # Auto-create a revert PR
+            main_sha = await _get_main_sha()
+            revert_pr_url = ""
+            revert_pr_num = 0
+
+            if main_sha:
+                now = datetime.now(IST)
+                revert_branch = (
+                    f"revert/{record.parameter_name}-pr{record.github_pr_number}"
+                    f"-{now.strftime('%Y%m%d')}"
+                )
+                if await _create_branch(revert_branch, main_sha):
+                    cfg_content, _ = await _get_file_sha(revert_branch, "mcp_server/config.py")
+                    if cfg_content:
+                        reverted = _apply_parameter_to_config(
+                            cfg_content, record.parameter_name, record.old_value
+                        )
+                        await _update_file(
+                            revert_branch, "mcp_server/config.py", reverted,
+                            f"revert: {record.parameter_name} "
+                            f"{record.new_value}→{record.old_value}\n\n"
+                            f"Win rate dropped {win_rate_before:.1f}%→{win_rate_after:.1f}% "
+                            f"over 20 trades post PR#{record.github_pr_number}",
+                        )
+
+                    revert_pr = await _create_pull_request(
+                        revert_branch,
+                        f"revert: {record.parameter_name} "
+                        f"dropped {win_rate_before:.0f}%→{win_rate_after:.0f}%",
+                        (
+                            f"## Auto-Revert: Performance Degradation\n\n"
+                            f"- **Parameter:** {record.parameter_name}\n"
+                            f"- **Reverting:** {record.new_value} → {record.old_value}\n"
+                            f"- **Win rate before change:** {win_rate_before:.1f}%\n"
+                            f"- **Win rate after change:** {win_rate_after:.1f}% "
+                            f"(over 20 trades)\n"
+                            f"- **Drop:** -{drop:.1f}%\n"
+                            f"- **Original PR:** #{record.github_pr_number}\n\n"
+                            f"Auto-generated by post-deployment monitoring.\n"
+                        ),
+                    )
+
+                    if revert_pr:
+                        revert_pr_num = revert_pr.get("number", 0)
+                        revert_pr_url = revert_pr.get("html_url", "")
+
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    f"↩ Revert #{revert_pr_num}",
+                    callback_data=f"approve_pr_{revert_pr_num}",
+                ),
+                InlineKeyboardButton(
+                    "Keep Current",
+                    callback_data=f"reject_pr_{revert_pr_num}",
+                ),
+                *(
+                    [InlineKeyboardButton("👁 View PR", url=revert_pr_url)]
+                    if revert_pr_url else []
+                ),
+            ]])
+
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"⚠️ PERFORMANCE DEGRADATION DETECTED\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Parameter : {record.parameter_name}\n"
+                    f"Change    : {record.old_value} → {record.new_value}\n"
+                    f"Before    : {win_rate_before:.1f}% win rate\n"
+                    f"After     : {win_rate_after:.1f}% win rate (20 trades)\n"
+                    f"Drop      : -{drop:.1f}%\n\n"
+                    f"A revert PR has been created automatically.\n"
+                    f"Tap ↩ Revert to restore previous settings."
+                ),
+                reply_markup=keyboard,
+            )
+
+            record.win_rate_after = win_rate_after
+            record.reverted = True
+            record.reverted_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            record.revert_reason = f"auto_revert:win_rate_dropped_{drop:.1f}pct"
+            await session.flush()
+            await session.commit()
+            logger.info(
+                f"Auto-revert PR #{revert_pr_num} created for "
+                f"{record.parameter_name} (drop={drop:.1f}%)"
+            )
+
+        else:
+            # Change is working — record win_rate_after and notify
+            record.win_rate_after = win_rate_after
+            await session.flush()
+            await session.commit()
+
+            sign = "+" if win_rate_after >= win_rate_before else ""
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"✅ PARAMETER CHANGE WORKING\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Parameter : {record.parameter_name}\n"
+                    f"Change    : {record.old_value} → {record.new_value}\n"
+                    f"Before    : {win_rate_before:.1f}% win rate\n"
+                    f"After     : {win_rate_after:.1f}% win rate (20 trades)\n"
+                    f"Delta     : {sign}{win_rate_after - win_rate_before:.1f}%\n\n"
+                    f"✅ Change is performing as expected."
+                ),
+            )
+            logger.info(
+                f"Post-deploy check complete PR#{record.github_pr_number}: "
+                f"win_rate_after={win_rate_after:.1f}%"
+            )

@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from typing import Optional
 
 import pytz
@@ -30,6 +30,7 @@ from mcp_server.config import (
     WEEKLY_ANALYSIS_DAY, WEEKLY_ANALYSIS_TIME,
     PRICE_CHECK_INTERVAL_SECONDS,
 )
+from mcp_server.tools.trade_calculator import LOT_SIZES
 from mcp_server.models.database import (
     init_db, close_db, get_session_factory,
     get_or_create_user, increment_signals_today,
@@ -393,9 +394,13 @@ async def check_open_signals_prices() -> None:
                     exit_price = sig.tp1
 
             if outcome and exit_price:
-                # Calculate P&L
+                # Calculate P&L using segment-aware lot size
                 pts = abs(exit_price - sig.entry)
-                lot_size = 50  # Default
+                base_sym = (sig.instrument or "").split(":")[-1].upper()
+                lot_size = LOT_SIZES.get(base_sym, LOT_SIZES.get("DEFAULT", 1))
+                # INDICES / FNO default to 50 if not in map
+                if sig.segment in ("INDICES", "INDIAN_FNO") and lot_size == 1:
+                    lot_size = 50
                 is_win = outcome.startswith("TP")
                 gross = pts * (sig.lots or 1) * lot_size
                 net_pnl = (gross - (sig.charges or 0)) if is_win else -(pts * (sig.lots or 1) * lot_size) - (sig.charges or 0)
@@ -412,7 +417,7 @@ async def check_open_signals_prices() -> None:
                         db_sig.exit_price = exit_price
                         db_sig.actual_rr = pts / sig.sl_points if sig.sl_points else 0
                         db_sig.net_pnl = round(net_pnl, 2)
-                        db_sig.closed_at = datetime.utcnow()
+                        db_sig.closed_at = datetime.now(timezone.utc).replace(tzinfo=None)
                         await session.commit()
 
                 # Send outcome notification
@@ -434,7 +439,7 @@ async def send_session_summary(session_name: str) -> None:
     factory = get_session_factory()
 
     try:
-        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start = datetime.now(timezone.utc).replace(tzinfo=None).replace(hour=0, minute=0, second=0, microsecond=0)
         async with factory() as session:
             result = await session.execute(
                 select(Signal).where(
@@ -466,8 +471,17 @@ async def run_scheduled_weekly_analysis() -> None:
     settings = get_settings()
     factory = get_session_factory()
     logger.info("Running scheduled weekly analysis...")
+    from mcp_server.tools.performance import (
+        run_weekly_analysis, check_post_deployment_performance,
+    )
+    # First: evaluate post-deployment performance for prior changes
     async with factory() as session:
-        from mcp_server.tools.performance import run_weekly_analysis
+        await check_post_deployment_performance(
+            session, _telegram_app.bot, settings.telegram_chat_id
+        )
+        await session.commit()
+    # Then: run new weekly analysis
+    async with factory() as session:
         await run_weekly_analysis(session, _telegram_app.bot, settings.telegram_chat_id)
         await session.commit()
 
@@ -589,7 +603,7 @@ async def health_check():
         "status": "ok",
         "mode": "paper" if settings.paper_mode else "live",
         "environment": settings.railway_environment,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
     }
 
 

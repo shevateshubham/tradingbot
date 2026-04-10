@@ -1,5 +1,5 @@
 import asyncio, logging
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import Optional, List, Dict, Any
 import httpx, pytz
 from mcp_server.config import get_settings, FNO_SYMBOLS, NSE_BASE_URL, BINANCE_BASE_URL
@@ -33,7 +33,7 @@ class MarketScanner:
     async def scan_instrument(self, symbol, exchange, segment, enabled_markets):
         key=f"{exchange}:{symbol}"
         if key in self._last_signals:
-            age=(datetime.utcnow()-self._last_signals[key]).total_seconds()/60
+            age=(datetime.now(timezone.utc).replace(tzinfo=None)-self._last_signals[key]).total_seconds()/60
             if age<self._cooldown: return None
         if segment not in enabled_markets: return None
         ohlcv=None
@@ -101,7 +101,7 @@ class MarketScanner:
         tp2=cur+spread*2 if sig_dir=="LONG" else cur-spread*2
         tp3=cur+spread*3 if sig_dir=="LONG" else cur-spread*3
         sl_pts=abs(entry-sl)
-        self._last_signals[key]=datetime.utcnow()
+        self._last_signals[key]=datetime.now(timezone.utc).replace(tzinfo=None)
         logger.info(f"SIGNAL: {symbol} {sig_dir} score={sig_score} grade={sig_grade}")
         return {"instrument":f"{exchange}:{symbol}","base_symbol":symbol,"exchange":exchange,"segment":segment,"direction":sig_dir,"timeframe":"15","signal_type":"INSTITUTIONAL","score":sig_score,"grade":sig_grade,"entry":round(entry,2),"sl":round(sl,2),"tp1":round(tp1,2),"tp2":round(tp2,2),"tp3":round(tp3,2),"sl_points":round(sl_pts,2),"sl_percent":round(sl_pts/entry*100,3),"lots":1,"charges":850.0 if segment in ("INDICES","INDIAN_FNO") else 0,"net_at_tp1":round(sl_pts*50-850,2),"htf_bias":direction,"in_discount":in_discount,"liquidity_swept":inst.liquidity_event.value!="NONE","fvg_present":inst.propulsion_block,"volume_ratio":round(v[-1]/avg_vol,2),"session":"INDIA" if segment in ("INDICES","INDIAN_FNO","INDIAN_STOCKS") else "GLOBAL","trap_present":trap,"is_killzone":kz,"ltf_choch":ltf_choch,"options_pcr":pcr_v,"options_oi_bias":options_data.get("options_direction"),"max_pain":mp,"gex":options_data.get("gex"),"setup_type":f"Institutional {inst.wyckoff_phase.value}|{inst.liquidity_event.value}","narrative":sig_narrative,"htf_timeframe":"4H","confluences":{"htf_bias":direction,"poi_type":poi,"zone_type":"Discount" if in_discount else "Premium","liquidity_swept":inst.liquidity_event.value!="NONE","killzone":kz,"ltf_choch":ltf_choch},"institutional_evidence":inst.evidence,"decision_evidence":sig_evidence,"options_signal":options_signal}
 

@@ -1,6 +1,6 @@
 import asyncio,logging
 from collections import deque
-from datetime import datetime,date
+from datetime import datetime,date,timezone
 from typing import Optional,Dict,List,Any
 import httpx,pytz
 logger=logging.getLogger(__name__)
@@ -128,7 +128,7 @@ class EveningSessionEngine:
         return {sym:r for sym,r in zip(tasks.keys(),fetched) if isinstance(r,dict) and r}
     async def _process(self,sym,tf,inst_info):
         key=f"{sym}:{tf}"
-        if key in self._last_sigs and (datetime.utcnow()-self._last_sigs[key]).total_seconds()/60<60: return
+        if key in self._last_sigs and (datetime.now(timezone.utc).replace(tzinfo=None)-self._last_sigs[key]).total_seconds()/60<60: return
         logger.info(f"Analyzing {inst_info['display']} {tf}m ({self._b[sym][tf].count} candles)...")
         try:
             from mcp_server.tools.institutional_detector import analyze_institutional_activity
@@ -172,7 +172,7 @@ class EveningSessionEngine:
             sl_pts=abs(entry-sl)
             sess="LONDON" if 13*60+30<=hm<=17*60+30 else "NEW_YORK" if 18*60+30<=hm<=23*60 else "EVENING"
             sig={"instrument":f"{inst_info['exchange']}:{inst_info['display']}","base_symbol":inst_info["display"],"exchange":inst_info["exchange"],"segment":inst_info["segment"],"direction":sd,"timeframe":str(tf),"signal_type":"INSTITUTIONAL","score":sig_score,"grade":sig_grade,"entry":round(entry,5),"sl":round(sl,5),"tp1":round(tp1,5),"tp2":round(tp2,5),"tp3":round(tp3,5),"sl_points":round(sl_pts,5),"sl_percent":round(sl_pts/entry*100,3) if entry>0 else 0,"lots":1,"charges":round(cur*0.0008,2),"net_at_tp1":round(sl_pts-cur*0.0008,2),"htf_bias":inst.institutional_bias,"in_discount":cur<eq,"liquidity_swept":inst.liquidity_event.value!="NONE","fvg_present":inst.propulsion_block,"volume_ratio":round(v[-1]/avg_v,2),"session":sess,"trap_present":trap,"is_killzone":kz,"ltf_choch":ltf,"options_pcr":None,"options_oi_bias":None,"max_pain":None,"setup_type":f"{inst.wyckoff_phase.value}|{inst.liquidity_event.value}","narrative":sig_narrative,"htf_timeframe":"4H","confluences":{"htf_bias":inst.institutional_bias,"poi_type":poi,"zone_type":"Discount" if cur<eq else "Premium","liquidity_swept":inst.liquidity_event.value!="NONE","killzone":kz,"ltf_choch":ltf},"institutional_evidence":inst.evidence,"decision_evidence":sig_evidence,"options_signal":None}
-            self._last_sigs[key]=datetime.utcnow()
+            self._last_sigs[key]=datetime.now(timezone.utc).replace(tzinfo=None)
             logger.info(f"EVENING SIGNAL: {inst_info['display']} {sd} score={sig_score} grade={sig_grade} tf={tf}m sess={sess}")
             if self._cb: await self._cb(sig)
         except Exception as e: logger.error(f"Evening process {sym} {tf}m: {e}",exc_info=True)
