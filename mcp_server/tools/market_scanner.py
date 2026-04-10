@@ -50,9 +50,8 @@ class MarketScanner:
         _sl=min(l[-25:-4]) if len(l)>=25 else (min(l[:-3]) if len(l)>3 else min(l))
         _sh=max(h[-25:-4]) if len(h)>=25 else (max(h[:-3]) if len(h)>3 else max(h))
         inst=analyze_institutional_activity(o,h,l,c,v,_sl,_sh,weekly)
-        if inst.institutional_bias=="NEUTRAL" and inst.total_score<5: return None
+        if inst.institutional_bias=="NEUTRAL": return None
         direction=inst.institutional_bias
-        if direction=="NEUTRAL": return None
         sig_dir="LONG" if direction=="BULLISH" else "SHORT"
         poi="BREAKER" if inst.breaker_block else "OB_FVG" if inst.propulsion_block else "OB"
         eq=(max(h[-50:])+min(l[-50:]))/2 if len(h)>=50 else (resistance+support)/2
@@ -86,7 +85,7 @@ class MarketScanner:
             near_mp=mp and is_near_max_pain(cur,mp)
             gex_s=options_data.get("gex",0)>0 if sig_dir=="LONG" else options_data.get("gex",0)<0
             opts_conf=(sig_dir=="LONG" and options_data.get("options_direction")=="BEARISH") or (sig_dir=="SHORT" and options_data.get("options_direction")=="BULLISH")
-            decision=score_decision(weekly_trend=weekly,daily_structure=daily,h4_flow=h4,signal_direction=sig_dir,institutional=inst,poi_type=poi,trap_confirmed=trap,ltf_choch=ltf_choch,volume_spike=vol_spike,in_discount=in_discount,pcr_confirms=pcr_c,near_max_pain=near_mp,gex_supports=gex_s,options_conflict=opts_conf,is_index=(segment=="INDICES"),is_killzone=kz,is_session_open=kz,htf_ob_confluence=inst.breaker_block,first_touch_ob=not inst.mitigation_block,ob_already_touched=inst.mitigation_block,is_lunch_hour=lunch,low_volume_session=not kz and hm>15*60,segment=segment)
+            decision=score_decision(weekly_trend=weekly,daily_structure=daily,h4_flow=h4,signal_direction=sig_dir,institutional=inst,poi_type=poi,trap_confirmed=trap,ltf_choch=ltf_choch,volume_spike=vol_spike,in_discount=in_discount,pcr_confirms=pcr_c,near_max_pain=near_mp,gex_supports=gex_s,options_conflict=opts_conf,is_index=(segment=="INDICES"),is_killzone=kz,is_session_open=(not lunch) if segment in ("INDICES","INDIAN_FNO") else True,htf_ob_confluence=inst.breaker_block,first_touch_ob=not inst.mitigation_block,ob_already_touched=inst.mitigation_block,is_lunch_hour=lunch,low_volume_session=not kz and hm>15*60,segment=segment)
             if not decision.send: return None
             sig_grade=decision.grade; sig_score=decision.score; sig_narrative=decision.narrative; sig_evidence=decision.evidence
         options_signal=None

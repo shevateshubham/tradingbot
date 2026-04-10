@@ -146,7 +146,7 @@ class EveningSessionEngine:
             _sl=min(l[-25:-4]) if len(l)>=25 else (min(l[:-3]) if len(l)>3 else min(l))
             _sh=max(h[-25:-4]) if len(h)>=25 else (max(h[:-3]) if len(h)>3 else max(h))
             inst=analyze_institutional_activity(o,h,l,c,v,_sl,_sh,weekly)
-            if inst.institutional_bias=="NEUTRAL" and inst.total_score<5: return
+            if inst.institutional_bias=="NEUTRAL": return
             sd="LONG" if inst.institutional_bias=="BULLISH" else "SHORT"
             trap=inst.liquidity_event.value in ("SSL_SWEPT","BSL_SWEPT","IND_BULL","IND_BEAR","TURTLE_BULL","TURTLE_BEAR")
             ltf=False
@@ -163,7 +163,7 @@ class EveningSessionEngine:
                 sd=claude.direction;sig_grade=claude.grade;sig_score=claude.confidence
                 sig_narrative=claude.narrative+" | ".join(claude.key_reasons[:2]);sig_evidence=claude.key_reasons+inst.evidence[:2]
             else:
-                dec=score_decision(weekly_trend=weekly,daily_structure=daily,h4_flow=h4,signal_direction=sd,institutional=inst,poi_type=poi,trap_confirmed=trap,ltf_choch=ltf,volume_spike=vs,in_discount=cur<eq,is_index=False,is_killzone=kz,is_session_open=kz,htf_ob_confluence=inst.breaker_block,first_touch_ob=not inst.mitigation_block,ob_already_touched=inst.mitigation_block,segment=inst_info["segment"])
+                dec=score_decision(weekly_trend=weekly,daily_structure=daily,h4_flow=h4,signal_direction=sd,institutional=inst,poi_type=poi,trap_confirmed=trap,ltf_choch=ltf,volume_spike=vs,in_discount=cur<eq,is_index=False,is_killzone=kz,is_session_open=True,htf_ob_confluence=inst.breaker_block,first_touch_ob=not inst.mitigation_block,ob_already_touched=inst.mitigation_block,segment=inst_info["segment"])
                 if not dec.send: return
                 sig_grade=dec.grade;sig_score=dec.score;sig_narrative=dec.narrative;sig_evidence=dec.evidence
             pip=inst_info.get("pip",0.0001);sp=pip*200
