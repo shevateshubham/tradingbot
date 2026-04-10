@@ -198,22 +198,14 @@ def score_signal(enriched: dict) -> ScoreResult:
             breakdown=breakdown,
         )
 
-    # Score below minimum send threshold
+    # Score below minimum send threshold (also enforces grade A or better,
+    # since GRADE_THRESHOLDS["A"] == min_confluence_score == 72)
     min_score = settings.min_confluence_score
     if score < min_score:
-        logger.info(f"Hard discard: score {score} < min {min_score}")
+        logger.info(f"Hard discard: score {score} < min {min_score} (grade {grade})")
         return ScoreResult(
             score=score, grade=grade, passed=False,
             reject_reason=f"score_too_low:{score}<{min_score}",
-            breakdown=breakdown,
-        )
-
-    # Grade must be A or better to send
-    if grade in ("B", "C"):
-        logger.info(f"Hard discard: grade={grade}")
-        return ScoreResult(
-            score=score, grade=grade, passed=False,
-            reject_reason=f"grade_below_threshold:{grade}",
             breakdown=breakdown,
         )
 

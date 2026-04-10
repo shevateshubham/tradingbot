@@ -236,9 +236,9 @@ async def process_smc_payload(
     zone_type    = derive_zone_type(payload)
     narrative    = derive_narrative(payload, options_data)
 
-    # LTF CHOCH confirmed flag (inferred from structure field or signal_type)
+    # LTF CHOCH confirmed flag (inferred from signal_type OR structure field)
     ltf_choch = (
-        payload.signal_type in ("CHOCH", "OB_ENTRY") and
+        payload.signal_type == "CHOCH" or
         payload.structure in ("CHOCH", "LTF_CHOCH")
     )
 

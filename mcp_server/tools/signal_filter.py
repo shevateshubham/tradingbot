@@ -5,14 +5,15 @@ Every rejection is logged to discarded_signals table for analysis.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 
 import pytz
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mcp_server.config import (
-    TIMEFRAME_MODES, QUALITY_FILTERS, MAX_CONSECUTIVE_LOSSES, MAX_SPREAD_PERCENT, get_settings,
+    TIMEFRAME_MODES, QUALITY_FILTERS, MAX_CONSECUTIVE_LOSSES, MAX_SPREAD_PERCENT,
+    CONSECUTIVE_LOSS_PAUSE_HOURS, get_settings,
 )
 from mcp_server.models.database import (
     get_or_create_user, get_signals_sent_today, count_open_trades,
@@ -218,14 +219,11 @@ async def apply_filters(
     # ── 7. Consecutive loss protection ────────────────────────────
     recent_losses = await get_recent_losses(session, chat_id, hours=24)
     if recent_losses >= MAX_CONSECUTIVE_LOSSES:
-        from mcp_server.config import CONSECUTIVE_LOSS_PAUSE_HOURS
         reason = f"consecutive_loss_protection:{recent_losses}_losses"
         logger.warning(f"Consecutive loss protection triggered for chat_id={chat_id}")
-        # Auto-pause for 24 hours
+        # Auto-pause for configured hours
         if not user.signals_paused:
             user.signals_paused = True
-            user.pause_until = datetime.now(timezone.utc).replace(tzinfo=None).replace(tzinfo=None)
-            from datetime import timedelta
             user.pause_until = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=CONSECUTIVE_LOSS_PAUSE_HOURS)
             user.consecutive_losses = recent_losses
             await session.flush()
