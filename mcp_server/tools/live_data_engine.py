@@ -16,6 +16,10 @@ NSE_INDEX_URL="https://www.nseindia.com/api/allIndices"
 NSE_HIST_URL="https://www.nseindia.com/api/historical/indicesHistory"
 NSE_OC_INDEX="https://www.nseindia.com/api/option-chain-indices"
 TIMEFRAMES=[1,5,15,60]
+# Yahoo Finance symbols and per-TF settings for NSE index preload
+YF_NSE_SYM={"NIFTY":"%5ENSEI","BANKNIFTY":"%5ENSEBANK","FINNIFTY":"%5ENSEFIN","MIDCPNIFTY":"%5ENSEMIDCAP"}
+TF_YF_INTERVAL={1:"1m",5:"5m",15:"15m",60:"60m"}
+TF_YF_RANGE={1:"1d",5:"5d",15:"5d",60:"30d"}
 
 class Candle:
     __slots__=["ts","open","high","low","close","volume","closed"]
@@ -79,7 +83,9 @@ class LiveDataEngine:
     def __init__(self):
         self._f=NSEFetcher();self._running=False
         self._b={i["symbol"]:{tf:CandleBuilder(i["symbol"],tf) for tf in TIMEFRAMES} for i in INDICES}
-        self._hist={};self._oc={};self._oc_ts={};self._oc_ttl=180
+        # Per-timeframe historical data: _hist_tf[symbol][tf] = {opens,highs,lows,closes,volumes}
+        self._hist_tf={i["symbol"]:{tf:{} for tf in TIMEFRAMES} for i in INDICES}
+        self._oc={};self._oc_ts={};self._oc_ttl=180
         self._prices={};self._cb=None;self._last_sigs={}
 
     def set_signal_callback(self,cb):self._cb=cb
@@ -102,42 +108,53 @@ class LiveDataEngine:
         if raw:self._oc[sym]=raw;self._oc_ts[sym]=now
         return raw
 
+    async def _fetch_hist_yf(self,sym,tf):
+        """Fetch per-TF intraday bars from Yahoo Finance for NSE indices."""
+        yf_sym=YF_NSE_SYM.get(sym,f"{sym}.NS")
+        iv=TF_YF_INTERVAL.get(tf,"15m");rng=TF_YF_RANGE.get(tf,"5d")
+        url=f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_sym}"
+        try:
+            async with httpx.AsyncClient(timeout=15.0,headers={"User-Agent":"Mozilla/5.0","Accept":"application/json"}) as c:
+                r=await c.get(url,params={"interval":iv,"range":rng,"includePrePost":"false"})
+                if r.status_code!=200: logger.warning(f"YF {yf_sym} {tf}m: HTTP {r.status_code}"); return None
+                res=r.json().get("chart",{}).get("result",[])
+                if not res: return None
+                q=res[0].get("indicators",{}).get("quote",[{}])[0]
+                cls=[x or 0.0 for x in q.get("close",[])];ops=[x or 0.0 for x in q.get("open",[])]
+                his=[x or 0.0 for x in q.get("high",[])];los=[x or 0.0 for x in q.get("low",[])]
+                vls=[float(x) if x else 1000.0 for x in q.get("volume",[])]
+                f=[(o,h,l,c,v) for o,h,l,c,v in zip(ops,his,los,cls,vls) if c and c>0]
+                if len(f)<20: return None
+                o2,h2,l2,c2,v2=zip(*f)
+                return {"opens":list(o2),"highs":list(h2),"lows":list(l2),"closes":list(c2),"volumes":list(v2)}
+        except Exception as e: logger.debug(f"YF hist {sym} {tf}m: {e}"); return None
+
     async def _preload_historical(self):
-        logger.info("Preloading historical data from NSE...")
+        """Preload per-TF historical bars so analysis fires on first candle close."""
+        logger.info("Preloading per-TF historical data for NSE indices...")
+        loaded=0
         for inst in INDICES:
             sym=inst["symbol"]
-            try:
-                ck=await self._f._refresh()
-                end=date.today();start=end-timedelta(days=60)
-                params={"indexType":sym,"from":start.strftime("%d-%m-%Y"),"to":end.strftime("%d-%m-%Y")}
-                async with httpx.AsyncClient(timeout=15.0,cookies=ck,headers=self._f._h()) as c:
-                    r=await c.get(NSE_HIST_URL,params=params)
-                    if r.status_code==200:
-                        rows=r.json().get("data",{}).get("indexCloseOnlineRecords",[])
-                        if not self._hist.get(sym):self._hist[sym]={"opens":[],"highs":[],"lows":[],"closes":[],"volumes":[]}
-                        for row in rows:
-                            try:
-                                o=float(row.get("EOD_OPEN_INDEX_VAL",0)or 0);h=float(row.get("EOD_HIGH_INDEX_VAL",0)or 0)
-                                l=float(row.get("EOD_LOW_INDEX_VAL",0)or 0);cl=float(row.get("EOD_CLOSING_INDEX_VAL",0)or 0)
-                                if cl>0:
-                                    self._hist[sym]["opens"].append(o);self._hist[sym]["highs"].append(h)
-                                    self._hist[sym]["lows"].append(l);self._hist[sym]["closes"].append(cl)
-                                    self._hist[sym]["volumes"].append(1000.0)
-                            except Exception: pass
-                        logger.info(f"Preloaded {sym}: {len(self._hist.get(sym,{}).get('closes',[]))} candles")
-            except Exception as e:logger.warning(f"Preload failed {sym}: {e}")
-            await asyncio.sleep(0.5)
+            for tf in TIMEFRAMES:
+                h=await self._fetch_hist_yf(sym,tf)
+                if h:
+                    self._hist_tf[sym][tf]=h;loaded+=1
+                    logger.info(f"Hist preloaded: {sym} {tf}m — {len(h['closes'])} bars")
+                else:
+                    logger.warning(f"Hist preload failed: {sym} {tf}m — will rely on live candles")
+                await asyncio.sleep(0.4)
+        logger.info(f"Historical preload complete: {loaded}/{len(INDICES)*len(TIMEFRAMES)} TF datasets loaded")
 
     async def _process(self,sym,tf,inst_info):
         key=f"{sym}:{tf}"
         if key in self._last_sigs and (datetime.now(timezone.utc).replace(tzinfo=None)-self._last_sigs[key]).total_seconds()<3600:return
-        logger.info(f"Analyzing {sym} {tf}m ({self._b[sym][tf].count} candles)...")
+        logger.info(f"Analyzing {sym} {tf}m ({self._b[sym][tf].count} live + {len(self._hist_tf.get(sym,{}).get(tf,{}).get('closes',[]))} hist candles)...")
         try:
             from mcp_server.tools.institutional_detector import analyze_institutional_activity
             from mcp_server.tools.decision_engine import score_decision
             from mcp_server.tools.options_analysis import analyze_option_chain,is_near_max_pain
             from mcp_server.tools.claude_analyzer import evaluate_setup
-            ohlcv=self._b[sym][tf].get_ohlcv();hist=self._hist.get(sym,{})
+            ohlcv=self._b[sym][tf].get_ohlcv();hist=self._hist_tf.get(sym,{}).get(tf,{})
             m={k:(hist.get(k,[])+ohlcv.get(k,[]))[-200:] for k in ("opens","highs","lows","closes","volumes")}
             if len(m["closes"])<30:return
             o=m["opens"];h=m["highs"];l=m["lows"];c=m["closes"];v=m["volumes"];cur=c[-1]
@@ -208,7 +225,7 @@ class LiveDataEngine:
             p=data["price"];vol=data.get("volume",1000);self._prices[sym]=p
             for tf in TIMEFRAMES:
                 closed=self._b[sym][tf].update(p,now,vol)
-                hist_count=len(self._hist.get(sym,{}).get("closes",[]))
+                hist_count=len(self._hist_tf.get(sym,{}).get(tf,{}).get("closes",[]))
                 if closed and (self._b[sym][tf].count+hist_count)>=30:
                     await self._process(sym,tf,inst)
 

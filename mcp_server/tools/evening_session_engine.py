@@ -17,6 +17,11 @@ SESSION_START_H,SESSION_START_M=15,30
 TIMEFRAMES=[1,5,15,60]
 BINANCE_KLINES="https://api.binance.com/api/v3/klines"
 KILLZONES=[(13,30,14,0),(18,30,19,0),(20,0,20,30)]
+# Per-TF mappings for historical preload
+TF_BINANCE={1:"1m",5:"5m",15:"15m",60:"1h"}
+TF_YAHOO_INTERVAL={1:"1m",5:"5m",15:"15m",60:"60m"}
+TF_YAHOO_RANGE={1:"1d",5:"5d",15:"5d",60:"30d"}
+YF_FOREX_SYM={"EURUSD":"EURUSD=X","GBPUSD":"GBPUSD=X","USDJPY":"USDJPY=X","GBPJPY":"GBPJPY=X","AUDUSD":"AUDUSD=X"}
 class Candle:
     __slots__=["ts","open","high","low","close","volume","closed"]
     def __init__(self,ts,o): self.ts=ts;self.open=o;self.high=o;self.low=o;self.close=o;self.volume=0.0;self.closed=False
@@ -75,33 +80,33 @@ class ForexFetcher:
                     if p: return {"price":float(p),"open":float(p),"high":float(p)*1.001,"low":float(p)*0.999,"close":float(p),"volume":1000.0}
         except Exception as e: logger.debug(f"Forex {sym}: {e}")
         return None
-    async def fetch_hist(self,sym,days=200):
-        """Fetch daily historical rates from Frankfurter timeseries API."""
-        base=sym[:3].upper();quote=sym[3:].upper()
-        from datetime import timedelta
-        end=(datetime.now()).strftime("%Y-%m-%d")
-        start=(datetime.now()-timedelta(days=days+80)).strftime("%Y-%m-%d")  # +80 for weekends/holidays
+    async def fetch_hist_yf(self,sym,tf):
+        """Fetch per-timeframe historical bars from Yahoo Finance (intraday + daily)."""
+        yf=YF_FOREX_SYM.get(sym.upper(),f"{sym}=X")
+        iv=TF_YAHOO_INTERVAL.get(tf,"15m");rng=TF_YAHOO_RANGE.get(tf,"5d")
+        url=f"https://query1.finance.yahoo.com/v8/finance/chart/{yf}"
         try:
-            async with httpx.AsyncClient(timeout=15.0) as c:
-                r=await c.get(f"https://api.frankfurter.app/{start}..{end}",params={"from":base,"to":quote})
-                if r.status_code==200:
-                    raw=r.json().get("rates",{})
-                    if not raw: return None
-                    dates=sorted(raw.keys())
-                    cl=[float(raw[d][quote]) for d in dates if quote in raw[d]]
-                    if len(cl)<20: return None
-                    op=[cl[0]]+cl[:-1]  # open = prev day's close
-                    hi=[c*1.0015 for c in cl];lo=[c*0.9985 for c in cl]
-                    vo=[1000.0]*len(cl)
-                    logger.info(f"Forex hist loaded: {sym} ({len(cl)} daily bars)")
-                    return {"opens":op,"highs":hi,"lows":lo,"closes":cl,"volumes":vo}
-        except Exception as e: logger.debug(f"Forex hist {sym}: {e}")
-        return None
+            async with httpx.AsyncClient(timeout=15.0,headers={"User-Agent":"Mozilla/5.0","Accept":"application/json"}) as c:
+                r=await c.get(url,params={"interval":iv,"range":rng,"includePrePost":"false"})
+                if r.status_code!=200: logger.warning(f"YF {yf} {tf}m: HTTP {r.status_code}"); return None
+                res=r.json().get("chart",{}).get("result",[])
+                if not res: return None
+                q=res[0].get("indicators",{}).get("quote",[{}])[0]
+                cls=[x or 0.0 for x in q.get("close",[])];ops=[x or 0.0 for x in q.get("open",[])]
+                his=[x or 0.0 for x in q.get("high",[])];los=[x or 0.0 for x in q.get("low",[])]
+                vls=[float(x) if x else 1000.0 for x in q.get("volume",[])]
+                f=[(o,h,l,c,v) for o,h,l,c,v in zip(ops,his,los,cls,vls) if c and c>0]
+                if len(f)<20: return None
+                o2,h2,l2,c2,v2=zip(*f)
+                return {"opens":list(o2),"highs":list(h2),"lows":list(l2),"closes":list(c2),"volumes":list(v2)}
+        except Exception as e: logger.debug(f"YF hist {sym} {tf}m: {e}"); return None
 class EveningSessionEngine:
     def __init__(self):
         self._bin=BinanceFetcher();self._forex=ForexFetcher();self._running=False
         self._b={i["symbol"]:{tf:CandleBuilder(i["symbol"],tf) for tf in TIMEFRAMES} for i in EVENING_INSTRUMENTS}
-        self._hist={};self._prices={};self._cb=None;self._last_sigs={}
+        # Per-timeframe historical data: _hist_tf[symbol][tf] = {opens,highs,lows,closes,volumes}
+        self._hist_tf={i["symbol"]:{tf:{} for tf in TIMEFRAMES} for i in EVENING_INSTRUMENTS}
+        self._prices={};self._cb=None;self._last_sigs={}
     def set_signal_callback(self,cb): self._cb=cb
     def is_active(self):
         now=datetime.now(IST);hm=now.hour*60+now.minute
@@ -113,15 +118,26 @@ class EveningSessionEngine:
         now=datetime.now(IST);hm=now.hour*60+now.minute;s=SESSION_START_H*60+SESSION_START_M
         return s-hm if hm<s else 24*60-hm+s
     async def _load_hist(self):
+        """Preload per-TF historical bars for every instrument so analysis
+        runs immediately on the first candle close rather than waiting for 30 live ticks."""
+        logger.info("Preloading per-TF historical data for evening instruments...")
+        loaded=0
         for inst in EVENING_INSTRUMENTS:
             sym=inst["symbol"]
-            if inst["exchange"]=="BINANCE":
-                h=await self._bin.fetch_hist(sym,"15m",200)
-                if h: self._hist[sym]=h;logger.info(f"Binance hist loaded: {sym} ({len(h['closes'])} bars)")
-            elif inst["exchange"]=="FOREX":
-                h=await self._forex.fetch_hist(sym,days=200)
-                if h: self._hist[sym]=h
-            await asyncio.sleep(0.5)
+            for tf in TIMEFRAMES:
+                h=None
+                if inst["exchange"]=="BINANCE":
+                    h=await self._bin.fetch_hist(sym,TF_BINANCE[tf],200)
+                else:  # FOREX — use Yahoo Finance for intraday, fallback handled inside
+                    h=await self._forex.fetch_hist_yf(sym,tf)
+                if h:
+                    self._hist_tf[sym][tf]=h
+                    loaded+=1
+                    logger.info(f"Hist preloaded: {inst['display']} {tf}m — {len(h['closes'])} bars")
+                else:
+                    logger.warning(f"Hist preload failed: {inst['display']} {tf}m — will rely on live candles")
+                await asyncio.sleep(0.4)
+        logger.info(f"Historical preload complete: {loaded}/{len(EVENING_INSTRUMENTS)*len(TIMEFRAMES)} TF datasets loaded")
     async def _fetch_prices(self):
         tasks={i["symbol"]:(self._bin.fetch_price(i["symbol"]) if i["exchange"]=="BINANCE" else self._forex.fetch_price(i["symbol"])) for i in EVENING_INSTRUMENTS}
         fetched=await asyncio.gather(*tasks.values(),return_exceptions=True)
@@ -129,12 +145,13 @@ class EveningSessionEngine:
     async def _process(self,sym,tf,inst_info):
         key=f"{sym}:{tf}"
         if key in self._last_sigs and (datetime.now(timezone.utc).replace(tzinfo=None)-self._last_sigs[key]).total_seconds()/60<60: return
-        logger.info(f"Analyzing {inst_info['display']} {tf}m ({self._b[sym][tf].count} candles)...")
+        logger.info(f"Analyzing {inst_info['display']} {tf}m ({self._b[sym][tf].count} live + {len(self._hist_tf.get(sym,{}).get(tf,{}).get('closes',[]))} hist candles)...")
         try:
             from mcp_server.tools.institutional_detector import analyze_institutional_activity
             from mcp_server.tools.decision_engine import score_decision
             from mcp_server.tools.claude_analyzer import evaluate_setup
-            ohlcv=self._b[sym][tf].get_ohlcv();hist=self._hist.get(sym,{})
+            ohlcv=self._b[sym][tf].get_ohlcv()
+            hist=self._hist_tf.get(sym,{}).get(tf,{})   # correct TF resolution
             m={k:(hist.get(k,[])+ohlcv.get(k,[]))[-200:] for k in ("opens","highs","lows","closes","volumes")}
             if len(m["closes"])<30: return
             o=m["opens"];h=m["highs"];l=m["lows"];c=m["closes"];v=m["volumes"];cur=c[-1]
@@ -156,7 +173,6 @@ class EveningSessionEngine:
             kz=self.is_kz();now_ist=datetime.now(IST);hm=now_ist.hour*60+now_ist.minute
             eq=(max(h[-50:])+min(l[-50:]))/2 if len(h)>=50 else (max(h[-20:])+min(l[-20:]))/2
             poi="BREAKER" if inst.breaker_block else "OB_FVG" if inst.propulsion_block else "OB"
-            # ── Claude-powered decision ────────────────────────────────
             claude=await evaluate_setup(symbol=inst_info["display"],segment=inst_info["segment"],timeframe=tf,current_price=cur,closes=c,highs=h,lows=l,volumes=v,inst_bias=inst.institutional_bias,inst_score=inst.total_score,inst_evidence=inst.evidence,liquidity_event=inst.liquidity_event.value,breaker_block=inst.breaker_block,propulsion_block=inst.propulsion_block,mitigation_block=inst.mitigation_block,wyckoff_phase=inst.wyckoff_phase.value,weekly_trend=weekly,daily_structure=daily,h4_flow=h4,in_discount=cur<eq,is_killzone=kz,ltf_choch=ltf,volume_spike=vs)
             if claude is not None:
                 if not claude.send:logger.info(f"Claude rejected {inst_info['display']} {tf}m: {claude.risk_factors}");return
@@ -184,20 +200,20 @@ class EveningSessionEngine:
         now=datetime.now(IST)
         price_summary=", ".join(f"{inst['display']}={prices[inst['symbol']]['price']:.4f}" for inst in EVENING_INSTRUMENTS if inst["symbol"] in prices)
         candle_counts={inst["display"]:{tf:self._b[inst["symbol"]][tf].count for tf in TIMEFRAMES} for inst in EVENING_INSTRUMENTS}
-        logger.info(f"Evening tick @ {now.strftime('%H:%M:%S')} IST | {price_summary} | candles={candle_counts}")
+        logger.info(f"Evening tick @ {now.strftime('%H:%M:%S')} IST | {price_summary} | live_candles={candle_counts}")
         for inst in EVENING_INSTRUMENTS:
             sym=inst["symbol"];data=prices.get(sym)
             if not data or not data.get("price"): continue
             p=data["price"];vol=data.get("volume",1000.0);self._prices[sym]=p
             for tf in TIMEFRAMES:
                 closed=self._b[sym][tf].update(p,now,vol)
-                hist_count=len(self._hist.get(sym,{}).get("closes",[]))
+                hist_count=len(self._hist_tf.get(sym,{}).get(tf,{}).get("closes",[]))
                 if closed and (self._b[sym][tf].count+hist_count)>=30:
                     await self._process(sym,tf,inst)
     async def run(self):
         self._running=True;logger.info("Evening engine started")
         try: await self._load_hist()
-        except Exception as e: logger.error(f"Hist load: {e}")
+        except Exception as e: logger.error(f"Hist load error: {e}",exc_info=True)
         while self._running:
             try:
                 if self.is_active():
