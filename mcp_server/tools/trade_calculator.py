@@ -266,9 +266,9 @@ def calculate_position(
     # ── Step 2: Check RR ratio ────────────────────────────────────
     # Use TP2 (2:1 target) for RR calculation — TP1 is always 1:1 by design.
     tp2_distance = abs(tp2 - entry)
-    rr_ratio = tp2_distance / sl_points if sl_points > 0 else 0
+    rr_ratio = round(tp2_distance / sl_points, 4) if sl_points > 0 else 0
 
-    if rr_ratio < settings.min_rr_ratio:
+    if rr_ratio < settings.min_rr_ratio - 0.001:  # 0.001 tolerance for floating-point rounding
         logger.info(f"Hard discard: RR {rr_ratio:.2f} < min {settings.min_rr_ratio}")
         return TradeCalculation(
             entry=entry, sl=sl, tp1=tp1, tp2=tp2, tp3=tp3,
