@@ -218,6 +218,7 @@ def calculate_gex(
     option_data: List[Dict],
     underlying_price: float,
     days_to_expiry: int = 7,
+    lot_size: int = 50,
 ) -> float:
     """
     Net Gamma Exposure: net dealer gamma across all strikes.
@@ -228,6 +229,7 @@ def calculate_gex(
         option_data:      NSE records data list
         underlying_price: Current spot price
         days_to_expiry:   Days until expiry (default: 7 for weekly)
+        lot_size:         Contract lot size (NIFTY=50, BANKNIFTY=15, FINNIFTY=40)
     """
     T = days_to_expiry / 365.0
     r = 0.065  # Indian risk-free rate ~6.5%
@@ -253,9 +255,6 @@ def calculate_gex(
 
         ce_gamma = _bs_gamma(underlying_price, strike, T, r, ce_iv) if ce_iv > 0 else 0
         pe_gamma = _bs_gamma(underlying_price, strike, T, r, pe_iv) if pe_iv > 0 else 0
-
-        # Lot size approximation (NIFTY = 50, BANKNIFTY = 15)
-        lot_size = 50  # Default — would be passed in for accuracy
 
         # Dealers are short calls (negative gamma) and long puts (negative gamma)
         total_gex += (ce_oi - pe_oi) * ce_gamma * underlying_price * lot_size
@@ -310,6 +309,7 @@ def analyze_option_chain(
     raw_data: Dict[str, Any],
     underlying_price: float,
     days_to_expiry: int = 7,
+    lot_size: int = 50,
 ) -> Dict[str, Any]:
     """
     Run full options analysis on raw NSE response.
@@ -331,7 +331,7 @@ def analyze_option_chain(
         pcr         = calculate_pcr(option_data)
         oi_walls    = calculate_oi_walls(option_data)
         oi_bias     = calculate_oi_bias(option_data, underlying_value)
-        gex         = calculate_gex(option_data, underlying_value, days_to_expiry)
+        gex         = calculate_gex(option_data, underlying_value, days_to_expiry, lot_size=lot_size)
         iv_skew     = calculate_iv_skew(option_data, underlying_value)
 
         result = {

@@ -569,6 +569,7 @@ async def lifespan(app: FastAPI):
     _scheduler.start()
     asyncio.get_event_loop().call_later(10, lambda: asyncio.create_task(start_live_engine()))
     asyncio.get_event_loop().call_later(15, lambda: asyncio.create_task(start_evening_engine()))
+    asyncio.get_event_loop().call_later(20, lambda: asyncio.create_task(start_fno_scanner()))
     logger.info("Scheduler started: price_tracker, india_summary, global_summary, weekly_analysis, market_scanner")
 
     yield  # ── Server running ───────────────────────────────────────
@@ -701,3 +702,20 @@ async def start_evening_engine():
         await engine.run()
     except Exception as e:
         logger.error(f"Evening engine startup error: {e}", exc_info=True)
+
+
+async def start_fno_scanner():
+    """Start stock F&O scanner — runs during India market hours (09:15–15:30 IST) only."""
+    try:
+        from mcp_server.tools.fno_scanner import get_fno_scanner
+        scanner = get_fno_scanner()
+        async def on_signal(signal_data):
+            try:
+                await run_engine_signal_pipeline(signal_data)
+            except Exception as e:
+                logger.error(f"FnO signal send error: {e}")
+        scanner.set_signal_callback(on_signal)
+        logger.info("Starting stock F&O scanner...")
+        await scanner.run()
+    except Exception as e:
+        logger.error(f"FnO scanner startup error: {e}", exc_info=True)

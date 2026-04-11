@@ -84,13 +84,51 @@ class NSEFetcher:
         except Exception as e:logger.warning(f"NSE: {e}")
         return result
     async def fetch_oc(self,sym):
+        """Fetch option chain: NSE primary, Tickertape fallback."""
         ck=await self._refresh()
         try:
             async with httpx.AsyncClient(timeout=15.0,cookies=ck,headers=self._h()) as c:
                 r=await c.get(NSE_OC_INDEX,params={"symbol":sym})
-                if r.status_code==200:return r.json()
-        except Exception as e: logger.warning(f"OC fetch {sym}: {e}")
+                if r.status_code==200:
+                    logger.debug(f"OC {sym}: NSE OK")
+                    return r.json()
+                logger.warning(f"OC {sym}: NSE HTTP {r.status_code} — trying Tickertape")
+        except Exception as e:
+            logger.warning(f"OC {sym} NSE error: {e} — trying Tickertape")
+        # ── Tickertape fallback ────────────────────────────────────
+        tt_sym={"NIFTY":"NIFTY50","BANKNIFTY":"BANKNIFTY","FINNIFTY":"FINNIFTY","MIDCPNIFTY":"MIDCPNIFTY"}.get(sym,sym)
+        try:
+            async with httpx.AsyncClient(timeout=12.0,headers={"User-Agent":"Mozilla/5.0","Accept":"application/json","Referer":"https://www.tickertape.in/"}) as c:
+                r=await c.get(f"https://api.tickertape.in/options/chain",params={"sid":tt_sym})
+                if r.status_code==200:
+                    raw=r.json()
+                    adapted=self._adapt_tickertape(raw,sym)
+                    if adapted:
+                        logger.info(f"OC {sym}: Tickertape OK ({len(adapted.get('records',{}).get('data',[]))} strikes)")
+                        return adapted
+        except Exception as e:
+            logger.warning(f"OC {sym} Tickertape error: {e}")
         return None
+
+    @staticmethod
+    def _adapt_tickertape(raw:dict, sym:str) -> dict:
+        """Convert Tickertape option chain response to NSE-compatible format."""
+        try:
+            chain=raw.get("data",{}).get("optionChain",[])
+            if not chain: return {}
+            records=[]
+            underlying=raw.get("data",{}).get("underlyingValue",0) or 0
+            for item in chain:
+                strike=item.get("strike",0)
+                ce=item.get("CE") or {}
+                pe=item.get("PE") or {}
+                records.append({"strikePrice":strike,
+                    "CE":{"openInterest":ce.get("oi",0),"changeinOpenInterest":ce.get("coiC",0),"lastPrice":ce.get("ltp",0),"impliedVolatility":ce.get("iv",0)},
+                    "PE":{"openInterest":pe.get("oi",0),"changeinOpenInterest":pe.get("coiC",0),"lastPrice":pe.get("ltp",0),"impliedVolatility":pe.get("iv",0)}})
+            return {"records":{"data":records,"underlyingValue":underlying}}
+        except Exception as e:
+            logger.debug(f"Tickertape adapt {sym}: {e}")
+            return {}
 
 class LiveDataEngine:
     def __init__(self):
@@ -170,8 +208,9 @@ class LiveDataEngine:
                 logger.debug(f"Skip {sym} {tf}m — OB already mitigated, no breaker/propulsion")
                 return
             sd="LONG" if inst.institutional_bias=="BULLISH" else "SHORT"
+            lv=inst_info["lot_size"]
             od={};raw_o=await self._get_oc(sym)
-            if raw_o:od=analyze_option_chain(raw_o,cur)
+            if raw_o:od=analyze_option_chain(raw_o,cur,lot_size=lv)
             pcr=od.get("pcr",1.0);mp=od.get("max_pain");dir_o=od.get("options_direction","NEUTRAL")
             trap=inst.liquidity_event.value in ("SSL_SWEPT","BSL_SWEPT","IND_BULL","IND_BEAR","TURTLE_BULL","TURTLE_BEAR")
             ltf=False
@@ -218,7 +257,7 @@ class LiveDataEngine:
             tp1=round(cur+sl_dist if sd=="LONG" else cur-sl_dist, 2)
             tp2=round(cur+sl_dist*2 if sd=="LONG" else cur-sl_dist*2, 2)
             tp3=round(cur+sl_dist*3 if sd=="LONG" else cur-sl_dist*3, 2)
-            sl_pts=abs(entry-sl);lv=inst_info["lot_size"]
+            sl_pts=abs(entry-sl)
             # Risk-based position sizing: floor 1 lot, cap 10 lots
             from mcp_server.config import get_settings as _gs
             _cfg=_gs();_risk=_cfg.account_size*_cfg.risk_per_trade_percent/100

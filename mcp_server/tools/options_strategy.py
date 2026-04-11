@@ -67,9 +67,8 @@ def select_strategy(underlying_price, max_pain, pcr, ce_walls, pe_walls, days_to
     cr2=(sc+sp)-(bc+bp)
     return OptionsSignal(strategy=OptionsStrategy.IRON_CONDOR,instrument=instrument,sell_call_strike=sc_k,sell_put_strike=sp_k,buy_call_strike=bc_k,buy_put_strike=bp_k,sell_call_premium=sc,sell_put_premium=sp,total_credit=round(cr2,2),max_profit=round(cr2,2),max_loss=round(step*2-cr2,2),breakeven_upper=sc_k+cr2,breakeven_lower=sp_k-cr2,stop_loss=cr2*2,iv_rank=iv_rank,pcr=pcr,max_pain=max_pain,underlying_price=underlying_price,days_to_expiry=days_to_expiry,reason=f"Iron Condor: {sc_k}CE/{sp_k}PE. Defined risk.",confidence="MEDIUM",valid=cr2>0)
 
-def format_options_signal(sig, lots=1):
+def format_options_signal(sig, lots=1, lot_size=50):
     if not sig.valid: return ""
-    lot_size=50
     total=sig.total_credit*lots*lot_size
     lines=[f"\n⚙️ NON-DIRECTIONAL OPTIONS TRADE",f"Strategy  : {sig.strategy.value}",f"Instrument: {sig.instrument}","━━━━━━━━━━━━━━━━━━━━━━━"]
     if sig.sell_call_strike: lines.append(f"Sell CE   : {sig.sell_call_strike:.0f} @ ₹{sig.sell_call_premium:.1f}")
