@@ -9,6 +9,7 @@ Falls back to decision_engine.score_decision() transparently if the API is
 unavailable.
 """
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -127,25 +128,43 @@ Evaluate strictly. Signal only if:
 Respond ONLY with valid JSON, no markdown fences:
 {{"send":true/false,"direction":"LONG or SHORT","grade":"A+ or A or B or C","confidence":50-100,"narrative":"2 sentences max","key_reasons":["reason1","reason2"],"risk_factors":["risk1"]}}"""
 
+    resp = None
+    last_exc: object = None
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.post(
-                ANTHROPIC_API,
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": CLAUDE_MODEL,
-                    "max_tokens": 350,
-                    "temperature": 0,            # deterministic, consistent decisions
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-            )
+            for attempt in range(3):
+                try:
+                    resp = await client.post(
+                        ANTHROPIC_API,
+                        headers={
+                            "x-api-key": api_key,
+                            "anthropic-version": "2023-06-01",
+                            "content-type": "application/json",
+                        },
+                        json={
+                            "model": CLAUDE_MODEL,
+                            "max_tokens": 500,
+                            "temperature": 0,            # deterministic, consistent decisions
+                            "messages": [{"role": "user", "content": prompt}],
+                        },
+                    )
+                    if resp.status_code == 200:
+                        break
+                    if resp.status_code < 500:   # 4xx: client error, retrying won't help
+                        logger.warning(f"Claude API {resp.status_code} for {symbol}: {resp.text[:150]}")
+                        return None
+                    last_exc = resp.status_code
+                    logger.warning(f"Claude API {resp.status_code} for {symbol} (attempt {attempt+1}/3)")
+                except (httpx.ConnectError, httpx.TimeoutException) as e:
+                    last_exc = e
+                    logger.warning(f"Claude API network error for {symbol} (attempt {attempt+1}/3): {e}")
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)   # 1 s, then 2 s
+            else:
+                logger.error(f"Claude API failed after 3 attempts for {symbol}: {last_exc}")
+                return None
 
-        if resp.status_code != 200:
-            logger.warning(f"Claude API {resp.status_code} for {symbol}: {resp.text[:150]}")
+        if resp is None or resp.status_code != 200:
             return None
 
         raw = resp.json()["content"][0]["text"].strip()

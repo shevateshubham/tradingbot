@@ -66,8 +66,8 @@ class NSEFetcher:
                 r2=await c.get(f"{NSE_HOME}/option-chain");ck.update(dict(r2.cookies))
                 await asyncio.sleep(1.0)
                 r3=await c.get(f"{NSE_HOME}/market-data/live-equity-market");ck.update(dict(r3.cookies))
-                if ck:self._ck=ck;self._cts=now;logger.info(f"NSE engine cookies: {list(ck.keys())}")
-                else:logger.warning("NSE engine: no cookies returned")
+                if ck:self._ck=ck;self._cts=now;logger.info(f"NSE cookies refreshed: {list(ck.keys())}")
+                else:logger.warning("NSE: no cookies returned from warm-up")
         except Exception as e:logger.warning(f"Cookie refresh: {e}")
         return self._ck
     def _h(self):return {"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36","Accept":"application/json, text/plain, */*","Accept-Language":"en-US,en;q=0.9","Accept-Encoding":"gzip, deflate","Referer":"https://www.nseindia.com/option-chain","Connection":"keep-alive","Cache-Control":"no-cache","sec-ch-ua":'"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',"sec-ch-ua-mobile":"?0","sec-ch-ua-platform":'"Windows"',"sec-fetch-dest":"empty","sec-fetch-mode":"cors","sec-fetch-site":"same-origin","X-Requested-With":"XMLHttpRequest"}
@@ -165,6 +165,10 @@ class LiveDataEngine:
             _sh=max(h[-25:-4]) if len(h)>=25 else (max(h[:-3]) if len(h)>3 else max(h))
             inst=analyze_institutional_activity(o,h,l,c,v,_sl,_sh,weekly)
             if inst.institutional_bias=="NEUTRAL":return
+            # Skip plain mitigated OBs — only trade with compensating structure
+            if inst.mitigation_block and not (inst.breaker_block or inst.propulsion_block):
+                logger.debug(f"Skip {sym} {tf}m — OB already mitigated, no breaker/propulsion")
+                return
             sd="LONG" if inst.institutional_bias=="BULLISH" else "SHORT"
             od={};raw_o=await self._get_oc(sym)
             if raw_o:od=analyze_option_chain(raw_o,cur)
@@ -198,19 +202,31 @@ class LiveDataEngine:
                     dte=max(1,(3-date.today().weekday())%7 or 7)
                     os=select_strategy(underlying_price=cur,max_pain=mp or cur,pcr=pcr or 1.0,ce_walls=od.get("ce_walls",[]),pe_walls=od.get("pe_walls",[]),days_to_expiry=dte,instrument=sym,directional_bias=inst.institutional_bias)
                 except Exception as e: logger.debug(f"Options strategy {sym}: {e}")
-            # ATR-based SL/TP — volatility-adjusted, institutional grade
+            # Determine signal_type from institutional structure
+            sig_type=("BREAKER" if inst.breaker_block else "OB_ENTRY" if inst.propulsion_block else "OB_ENTRY" if inst.ob_high else "INSTITUTIONAL")
+            # OB-aware SL/TP — use actual OB zone when price is near the block
+            ob_h=inst.ob_high;ob_l=inst.ob_low
+            ob_m=round((ob_h+ob_l)/2,2) if ob_h and ob_l else None
             atr=_calc_atr(h,l,c)
-            sl_dist=max(atr*1.5, cur*0.002)  # 1.5×ATR, floor 0.2% of price
+            if ob_h and ob_l and ob_l<cur<ob_h*1.02:
+                raw_sl=ob_l*(1-0.0005) if sd=="LONG" else ob_h*(1+0.0005)
+                sl_dist=max(abs(cur-raw_sl),atr*0.5,cur*0.001)   # floor: half ATR or 0.1%
+            else:
+                sl_dist=max(atr*1.5,cur*0.002)                   # pure ATR fallback, floor 0.2%
             entry=cur
             sl=round(cur-sl_dist if sd=="LONG" else cur+sl_dist, 2)
             tp1=round(cur+sl_dist if sd=="LONG" else cur-sl_dist, 2)
             tp2=round(cur+sl_dist*2 if sd=="LONG" else cur-sl_dist*2, 2)
             tp3=round(cur+sl_dist*3 if sd=="LONG" else cur-sl_dist*3, 2)
             sl_pts=abs(entry-sl);lv=inst_info["lot_size"]
-            charges=round(sl_pts*lv*0.0003+850, 2)  # approx brokerage+STT+GST
-            sig={"instrument":f"NSE:{sym}","base_symbol":sym,"exchange":"NSE","segment":"INDICES","direction":sd,"timeframe":str(tf),"signal_type":"INSTITUTIONAL","score":sig_score,"grade":sig_grade,"entry":round(entry,2),"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sl_points":round(sl_pts,2),"sl_percent":round(sl_pts/entry*100,3),"rr_ratio":2.0,"lots":1,"lot_size":lv,"charges":charges,"net_at_tp1":round(sl_pts*lv-charges,2),"net_at_tp2":round(sl_pts*lv*2-charges,2),"net_at_tp3":round(sl_pts*lv*3-charges,2),"atr":round(atr,2),"htf_bias":inst.institutional_bias,"in_discount":cur<eq,"liquidity_swept":inst.liquidity_event.value!="NONE","fvg_present":inst.propulsion_block,"volume_ratio":round(v[-1]/avg_v,2),"session":"INDIA","trap_present":trap,"is_killzone":kz,"ltf_choch":ltf,"options_pcr":pcr,"options_oi_bias":dir_o,"max_pain":mp,"gex":od.get("gex"),"setup_type":f"{inst.wyckoff_phase.value}|{inst.liquidity_event.value}","narrative":sig_narrative,"htf_timeframe":"4H","confluences":{"htf_bias":inst.institutional_bias,"poi_type":poi,"zone_type":"Discount" if cur<eq else "Premium","liquidity_swept":inst.liquidity_event.value!="NONE","killzone":kz,"ltf_choch":ltf},"institutional_evidence":inst.evidence,"decision_evidence":sig_evidence,"options_signal":os}
+            # Risk-based position sizing: floor 1 lot, cap 10 lots
+            from mcp_server.config import get_settings as _gs
+            _cfg=_gs();_risk=_cfg.account_size*_cfg.risk_per_trade_percent/100
+            lots=max(1,min(10,int(_risk/(sl_pts*lv)))) if sl_pts>0 and lv>0 else 1
+            charges=round(sl_pts*lv*lots*0.0003+850, 2)  # approx brokerage+STT+GST
+            sig={"instrument":f"NSE:{sym}","base_symbol":sym,"exchange":"NSE","segment":"INDICES","direction":sd,"timeframe":str(tf),"signal_type":sig_type,"score":sig_score,"grade":sig_grade,"entry":round(entry,2),"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sl_points":round(sl_pts,2),"sl_percent":round(sl_pts/entry*100,3),"rr_ratio":2.0,"lots":lots,"lot_size":lv,"charges":charges,"net_at_tp1":round(sl_pts*lv*lots-charges,2),"net_at_tp2":round(sl_pts*lv*lots*2-charges,2),"net_at_tp3":round(sl_pts*lv*lots*3-charges,2),"atr":round(atr,2),"htf_bias":inst.institutional_bias,"htf_matches_direction":True,"in_discount":cur<eq,"liquidity_swept":inst.liquidity_event.value!="NONE","fvg_present":inst.propulsion_block,"volume_ratio":round(v[-1]/avg_v,2),"session":"INDIA","trap_present":trap,"is_killzone":kz,"ltf_choch":ltf,"ob_already_touched":inst.mitigation_block,"ob_high":ob_h,"ob_low":ob_l,"ob_mid":ob_m,"close":cur,"in_lunch":lunch,"options_pcr":pcr,"options_oi_bias":dir_o,"max_pain":mp,"gex":od.get("gex"),"setup_type":f"{inst.wyckoff_phase.value}|{inst.liquidity_event.value}","narrative":sig_narrative,"htf_timeframe":"4H","confluences":{"htf_bias":inst.institutional_bias,"poi_type":poi,"zone_type":"Discount" if cur<eq else "Premium","liquidity_swept":inst.liquidity_event.value!="NONE","killzone":kz,"ltf_choch":ltf},"institutional_evidence":inst.evidence,"decision_evidence":sig_evidence,"options_signal":os}
             self._last_sigs[key]=datetime.now(timezone.utc).replace(tzinfo=None)
-            logger.info(f"SIGNAL: NSE:{sym} {sd} score={sig_score:.0f} grade={sig_grade} tf={tf}m entry={round(entry,2)} sl={sl} tp2={tp2} atr={round(atr,2)} (claude={'yes' if claude else 'fallback'})")
+            logger.info(f"SIGNAL: NSE:{sym} {sd} score={sig_score:.0f} grade={sig_grade} tf={tf}m type={sig_type} entry={round(entry,2)} sl={sl} tp2={tp2} lots={lots} atr={round(atr,2)} ob_h={ob_h} ob_l={ob_l} (claude={'yes' if claude else 'fallback'})")
             if self._cb:await self._cb(sig)
         except Exception as e:logger.error(f"Process {sym} {tf}m: {e}",exc_info=True)
 

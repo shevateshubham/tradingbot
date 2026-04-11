@@ -22,6 +22,15 @@ TF_BINANCE={15:"15m",60:"1h"}
 TF_YAHOO_INTERVAL={15:"15m",60:"60m"}
 TF_YAHOO_RANGE={15:"5d",60:"30d"}
 YF_FOREX_SYM={"EURUSD":"EURUSD=X","GBPUSD":"GBPUSD=X","USDJPY":"USDJPY=X","GBPJPY":"GBPJPY=X","AUDUSD":"AUDUSD=X"}
+# Active liquidity windows per instrument (IST minutes) — suppress off-session signals
+INST_SESSIONS={
+    "XAUUSDT": [(13*60+30, 23*60)],   # Gold: London + NY
+    "EURUSD":  [(13*60+30, 23*60)],   # Euro: London + NY
+    "GBPUSD":  [(13*60+30, 23*60)],   # Cable: London + NY
+    "USDJPY":  [(15*60+30, 23*60)],   # Yen: evening session only
+    "GBPJPY":  [(13*60+30, 23*60)],   # GBP/JPY: London + NY
+    "AUDUSD":  [(15*60+30, 23*60)],   # Aussie: evening session only
+}
 def _calc_atr(highs,lows,closes,period=14):
     """Average True Range — volatility measure for institutional SL sizing."""
     if len(closes)<2: return closes[-1]*0.002 if closes else 0.0
@@ -110,7 +119,9 @@ class EveningSessionEngine:
         self._prices={};self._cb=None;self._last_sigs={}
     def set_signal_callback(self,cb): self._cb=cb
     def is_active(self):
-        now=datetime.now(IST);hm=now.hour*60+now.minute
+        now=datetime.now(IST)
+        if now.weekday()==5: return False   # Saturday — Forex/Gold liquidity too thin
+        hm=now.hour*60+now.minute
         return SESSION_START_H*60+SESSION_START_M<=hm<24*60
     def is_kz(self):
         hm=datetime.now(IST).hour*60+datetime.now(IST).minute
@@ -148,13 +159,22 @@ class EveningSessionEngine:
             _sh=max(h[-25:-4]) if len(h)>=25 else (max(h[:-3]) if len(h)>3 else max(h))
             inst=analyze_institutional_activity(o,h,l,c,v,_sl,_sh,weekly)
             if inst.institutional_bias=="NEUTRAL": return
+            # Skip plain mitigated OBs — only trade them if there's compensating structure
+            if inst.mitigation_block and not (inst.breaker_block or inst.propulsion_block):
+                logger.debug(f"Skip {inst_info['display']} {tf}m — OB already mitigated, no breaker/propulsion")
+                return
+            # Suppress signals outside each instrument's high-liquidity session windows
+            now_hm=datetime.now(IST);hm=now_hm.hour*60+now_hm.minute
+            if not any(s<=hm<=e for s,e in INST_SESSIONS.get(sym,[(SESSION_START_H*60+SESSION_START_M,24*60)])):
+                logger.debug(f"Skip {inst_info['display']} {tf}m — outside active session window ({hm//60:02d}:{hm%60:02d} IST)")
+                return
             sd="LONG" if inst.institutional_bias=="BULLISH" else "SHORT"
             trap=inst.liquidity_event.value in ("SSL_SWEPT","BSL_SWEPT","IND_BULL","IND_BEAR","TURTLE_BULL","TURTLE_BEAR")
             ltf=False
             if len(c)>=6:
                 pt="UP" if c[-4]>c[-6] else "DOWN";ct="UP" if c[-1]>c[-3] else "DOWN";ltf=pt!=ct
             avg_v=sum(v[-20:])/20 if len(v)>=20 else v[-1];vs=v[-1]>avg_v*1.5
-            kz=self.is_kz();now_ist=datetime.now(IST);hm=now_ist.hour*60+now_ist.minute
+            kz=self.is_kz()
             eq=(max(h[-50:])+min(l[-50:]))/2 if len(h)>=50 else (max(h[-20:])+min(l[-20:]))/2
             poi="BREAKER" if inst.breaker_block else "OB_FVG" if inst.propulsion_block else "OB"
             claude=await evaluate_setup(symbol=inst_info["display"],segment=inst_info["segment"],timeframe=tf,current_price=cur,closes=c,highs=h,lows=l,volumes=v,inst_bias=inst.institutional_bias,inst_score=inst.total_score,inst_evidence=inst.evidence,liquidity_event=inst.liquidity_event.value,breaker_block=inst.breaker_block,propulsion_block=inst.propulsion_block,mitigation_block=inst.mitigation_block,wyckoff_phase=inst.wyckoff_phase.value,weekly_trend=weekly,daily_structure=daily,h4_flow=h4,in_discount=cur<eq,is_killzone=kz,ltf_choch=ltf,volume_spike=vs)
@@ -166,22 +186,31 @@ class EveningSessionEngine:
                 dec=score_decision(weekly_trend=weekly,daily_structure=daily,h4_flow=h4,signal_direction=sd,institutional=inst,poi_type=poi,trap_confirmed=trap,ltf_choch=ltf,volume_spike=vs,in_discount=cur<eq,is_index=False,is_killzone=kz,is_session_open=True,htf_ob_confluence=inst.breaker_block,first_touch_ob=not inst.mitigation_block,ob_already_touched=inst.mitigation_block,segment=inst_info["segment"])
                 if not dec.send: return
                 sig_grade=dec.grade;sig_score=dec.score;sig_narrative=dec.narrative;sig_evidence=dec.evidence
-            # ATR-based SL/TP — volatility-adjusted, institutional grade
+            # Determine signal_type from institutional structure
+            sig_type=("BREAKER" if inst.breaker_block else "OB_ENTRY" if inst.propulsion_block else "OB_ENTRY" if inst.ob_high else "INSTITUTIONAL")
+            # OB-aware SL/TP: use actual OB zone when price is at or near the block
             pip=inst_info.get("pip",0.0001)
             atr=_calc_atr(h,l,c)
-            sl_dist=max(atr*1.5, pip*15)   # 1.5×ATR, floor 15 pips/ticks
             prec=5 if pip<=0.0001 else 2
+            ob_h=inst.ob_high;ob_l=inst.ob_low
+            ob_m=round((ob_h+ob_l)/2,prec) if ob_h and ob_l else None
+            if ob_h and ob_l and ob_l<cur<ob_h*1.02:
+                # Price inside or just above the OB zone — SL beyond OB extreme
+                raw_sl=ob_l*(1-0.0005) if sd=="LONG" else ob_h*(1+0.0005)
+                sl_dist=max(abs(cur-raw_sl),atr*0.5)   # floor: half ATR
+            else:
+                sl_dist=max(atr*1.5,pip*15)             # pure ATR fallback
             entry=cur
-            sl=round(cur-sl_dist if sd=="LONG" else cur+sl_dist, prec)
-            tp1=round(cur+sl_dist if sd=="LONG" else cur-sl_dist, prec)
-            tp2=round(cur+sl_dist*2 if sd=="LONG" else cur-sl_dist*2, prec)
-            tp3=round(cur+sl_dist*3 if sd=="LONG" else cur-sl_dist*3, prec)
+            sl=round(cur-sl_dist if sd=="LONG" else cur+sl_dist,prec)
+            tp1=round(cur+sl_dist if sd=="LONG" else cur-sl_dist,prec)
+            tp2=round(cur+sl_dist*2 if sd=="LONG" else cur-sl_dist*2,prec)
+            tp3=round(cur+sl_dist*3 if sd=="LONG" else cur-sl_dist*3,prec)
             sl_pts=abs(entry-sl)
             sess="LONDON" if 13*60+30<=hm<=17*60+30 else "NEW_YORK" if 18*60+30<=hm<=23*60 else "EVENING"
             charges=round(cur*0.0008,2);rr=round(sl_pts*2/sl_pts,1) if sl_pts>0 else 2.0
-            sig={"instrument":f"{inst_info['exchange']}:{inst_info['display']}","base_symbol":inst_info["display"],"exchange":inst_info["exchange"],"segment":inst_info["segment"],"direction":sd,"timeframe":str(tf),"signal_type":"INSTITUTIONAL","score":sig_score,"grade":sig_grade,"entry":round(entry,prec),"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sl_points":round(sl_pts,prec),"sl_percent":round(sl_pts/entry*100,3) if entry>0 else 0,"rr_ratio":rr,"lots":1,"charges":charges,"net_at_tp1":round(sl_pts-charges,2),"net_at_tp2":round(sl_pts*2-charges,2),"net_at_tp3":round(sl_pts*3-charges,2),"atr":round(atr,prec),"htf_bias":inst.institutional_bias,"in_discount":cur<eq,"liquidity_swept":inst.liquidity_event.value!="NONE","fvg_present":inst.propulsion_block,"volume_ratio":round(v[-1]/avg_v,2),"session":sess,"trap_present":trap,"is_killzone":kz,"ltf_choch":ltf,"options_pcr":None,"options_oi_bias":None,"max_pain":None,"setup_type":f"{inst.wyckoff_phase.value}|{inst.liquidity_event.value}","narrative":sig_narrative,"htf_timeframe":"4H","confluences":{"htf_bias":inst.institutional_bias,"poi_type":poi,"zone_type":"Discount" if cur<eq else "Premium","liquidity_swept":inst.liquidity_event.value!="NONE","killzone":kz,"ltf_choch":ltf},"institutional_evidence":inst.evidence,"decision_evidence":sig_evidence,"options_signal":None}
+            sig={"instrument":f"{inst_info['exchange']}:{inst_info['display']}","base_symbol":inst_info["display"],"exchange":inst_info["exchange"],"segment":inst_info["segment"],"direction":sd,"timeframe":str(tf),"signal_type":sig_type,"score":sig_score,"grade":sig_grade,"entry":round(entry,prec),"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sl_points":round(sl_pts,prec),"sl_percent":round(sl_pts/entry*100,3) if entry>0 else 0,"rr_ratio":rr,"lots":1,"charges":charges,"net_at_tp1":round(sl_pts-charges,2),"net_at_tp2":round(sl_pts*2-charges,2),"net_at_tp3":round(sl_pts*3-charges,2),"atr":round(atr,prec),"htf_bias":inst.institutional_bias,"htf_matches_direction":True,"in_discount":cur<eq,"liquidity_swept":inst.liquidity_event.value!="NONE","fvg_present":inst.propulsion_block,"volume_ratio":round(v[-1]/avg_v,2),"session":sess,"trap_present":trap,"is_killzone":kz,"ltf_choch":ltf,"ob_already_touched":inst.mitigation_block,"ob_high":ob_h,"ob_low":ob_l,"ob_mid":ob_m,"close":cur,"in_lunch":False,"options_pcr":None,"options_oi_bias":None,"max_pain":None,"setup_type":f"{inst.wyckoff_phase.value}|{inst.liquidity_event.value}","narrative":sig_narrative,"htf_timeframe":"4H","confluences":{"htf_bias":inst.institutional_bias,"poi_type":poi,"zone_type":"Discount" if cur<eq else "Premium","liquidity_swept":inst.liquidity_event.value!="NONE","killzone":kz,"ltf_choch":ltf},"institutional_evidence":inst.evidence,"decision_evidence":sig_evidence,"options_signal":None}
             self._last_sigs[key]=datetime.now(timezone.utc).replace(tzinfo=None)
-            logger.info(f"EVENING SIGNAL: {inst_info['display']} {sd} score={sig_score} grade={sig_grade} tf={tf}m sess={sess} entry={round(entry,prec)} sl={sl} tp2={tp2} atr={round(atr,prec)}")
+            logger.info(f"EVENING SIGNAL: {inst_info['display']} {sd} score={sig_score} grade={sig_grade} tf={tf}m sess={sess} type={sig_type} entry={round(entry,prec)} sl={sl} tp2={tp2} atr={round(atr,prec)} ob_h={ob_h} ob_l={ob_l}")
             if self._cb: await self._cb(sig)
         except Exception as e: logger.error(f"Evening process {sym} {tf}m: {e}",exc_info=True)
     async def _tick(self):
