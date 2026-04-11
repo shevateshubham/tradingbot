@@ -128,6 +128,8 @@ class InstitutionalAnalysis:
     mitigation_block: bool           # OB already retested/touched
     wyckoff_phase: WyckoffPhase
     evidence: List[str] = field(default_factory=list)
+    ob_high: Optional[float] = None  # Upper boundary of detected Order Block
+    ob_low:  Optional[float] = None  # Lower boundary of detected Order Block
 
 
 def _detect_fvg(highs: list, lows: list, closes: list, direction: str) -> bool:
@@ -152,7 +154,7 @@ def _detect_order_block(
     opens: list, highs: list, lows: list, closes: list, direction: str
 ) -> tuple:
     """
-    Returns (ob_found: bool, already_mitigated: bool).
+    Returns (ob_found: bool, already_mitigated: bool, ob_high: Optional[float], ob_low: Optional[float]).
 
     Bullish OB: last bearish candle before a strong bullish impulse.
     Bearish OB: last bullish candle before a strong bearish impulse.
@@ -160,7 +162,7 @@ def _detect_order_block(
     """
     n = len(closes)
     if n < 5:
-        return False, False
+        return False, False, None, None
 
     cur = closes[-1]
 
@@ -176,7 +178,7 @@ def _detect_order_block(
                     ob_high = highs[i]
                     ob_low  = lows[i]
                     already_touched = ob_low <= cur <= ob_high
-                    return True, already_touched
+                    return True, already_touched, ob_high, ob_low
     else:
         for i in range(n - 5, max(0, n - 30), -1):
             if closes[i] > opens[i]:                          # bullish candle (OB candidate)
@@ -189,9 +191,9 @@ def _detect_order_block(
                     ob_high = highs[i]
                     ob_low  = lows[i]
                     already_touched = ob_low <= cur <= ob_high
-                    return True, already_touched
+                    return True, already_touched, ob_high, ob_low
 
-    return False, False
+    return False, False, None, None
 
 
 def _detect_breaker_block(highs: list, lows: list, closes: list, direction: str) -> bool:
@@ -338,7 +340,7 @@ def analyze_institutional_activity(
     direction = raw_bias if raw_bias != "NEUTRAL" else (weekly_trend if weekly_trend != "NEUTRAL" else "BULLISH")
 
     # ── 2. Order Block ─────────────────────────────────────────────────
-    ob_found, mitigation_block = _detect_order_block(opens, highs, lows, closes, direction)
+    ob_found, mitigation_block, ob_high, ob_low = _detect_order_block(opens, highs, lows, closes, direction)
     if ob_found:
         score += 20
         evidence.append(f"{'Bullish' if direction == 'BULLISH' else 'Bearish'} OB detected (+20)")
@@ -409,4 +411,6 @@ def analyze_institutional_activity(
         mitigation_block=mitigation_block,
         wyckoff_phase=wyckoff_phase,
         evidence=evidence,
+        ob_high=ob_high if ob_found else None,
+        ob_low=ob_low if ob_found else None,
     )
