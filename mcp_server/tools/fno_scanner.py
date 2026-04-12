@@ -149,6 +149,8 @@ class FnOScanner:
                 return
 
             sd = "LONG" if inst_a.institutional_bias == "BULLISH" else "SHORT"
+            ind_conf = inst_a.inducement_confirmed
+            ind_lvl  = inst_a.inducement_level
             trap = inst_a.liquidity_event.value not in ("NONE",)
             ltf = False
             if len(c) >= 6:
@@ -156,7 +158,8 @@ class FnOScanner:
                 ct = "UP" if c[-1] > c[-3] else "DOWN"
                 ltf = pt != ct
             avg_v = sum(v[-20:]) / 20 if len(v) >= 20 else v[-1]
-            vs = v[-1] > avg_v * 1.5
+            # FNO stocks need stronger volume confirmation — require 2× average
+            vs = v[-1] > avg_v * 2.0
             now_ist = datetime.now(IST)
             hm = now_ist.hour * 60 + now_ist.minute
             kz = any(abs(hm - (hh * 60 + mm)) <= 30 for hh, mm in [(9, 15), (11, 0), (13, 30)])
@@ -166,7 +169,26 @@ class FnOScanner:
                    else "OB_FVG" if inst_a.propulsion_block
                    else "OB")
 
-            logger.info(f"FnO scanning {sym} {tf}m bias={inst_a.institutional_bias} score={inst_a.total_score:.0f}")
+            logger.info(f"FnO scanning {sym} {tf}m bias={inst_a.institutional_bias} score={inst_a.total_score:.0f} inducement={ind_conf}")
+
+            # ── Pre-score: skip Claude for clearly weak setups ────────
+            pre = score_decision(
+                weekly_trend=weekly, daily_structure=daily, h4_flow=h4,
+                signal_direction=sd, institutional=inst_a, poi_type=poi,
+                trap_confirmed=trap, ltf_choch=ltf, volume_spike=vs,
+                in_discount=cur < eq, is_index=False, is_killzone=kz,
+                is_session_open=not lunch,
+                htf_ob_confluence=inst_a.breaker_block,
+                first_touch_ob=not inst_a.mitigation_block,
+                ob_already_touched=inst_a.mitigation_block,
+                is_lunch_hour=lunch,
+                low_volume_session=not kz and hm > 14 * 60,
+                segment="INDIAN_FNO",
+                inducement_confirmed=ind_conf,
+            )
+            if pre.score < 50:
+                logger.debug(f"FnO pre-score {pre.score:.0f}<50 for {sym} {tf}m — skip Claude")
+                return
 
             claude = await evaluate_setup(
                 symbol=sym, segment="INDIAN_FNO", timeframe=tf, current_price=cur,
@@ -177,6 +199,7 @@ class FnOScanner:
                 mitigation_block=inst_a.mitigation_block, wyckoff_phase=inst_a.wyckoff_phase.value,
                 weekly_trend=weekly, daily_structure=daily, h4_flow=h4,
                 in_discount=cur < eq, is_killzone=kz, ltf_choch=ltf, volume_spike=vs,
+                inducement_confirmed=ind_conf, inducement_level=ind_lvl,
             )
 
             if claude is not None:
@@ -189,25 +212,12 @@ class FnOScanner:
                 sig_narrative = claude.narrative + " | ".join(claude.key_reasons[:2])
                 sig_evidence = claude.key_reasons + inst_a.evidence[:2]
             else:
-                dec = score_decision(
-                    weekly_trend=weekly, daily_structure=daily, h4_flow=h4,
-                    signal_direction=sd, institutional=inst_a, poi_type=poi,
-                    trap_confirmed=trap, ltf_choch=ltf, volume_spike=vs,
-                    in_discount=cur < eq, is_index=False, is_killzone=kz,
-                    is_session_open=not lunch,
-                    htf_ob_confluence=inst_a.breaker_block,
-                    first_touch_ob=not inst_a.mitigation_block,
-                    ob_already_touched=inst_a.mitigation_block,
-                    is_lunch_hour=lunch,
-                    low_volume_session=not kz and hm > 14 * 60,
-                    segment="INDIAN_FNO",
-                )
-                if not dec.send:
+                if not pre.send:
                     return
-                sig_grade = dec.grade
-                sig_score = dec.score
-                sig_narrative = dec.narrative
-                sig_evidence = dec.evidence
+                sig_grade = pre.grade
+                sig_score = pre.score
+                sig_narrative = pre.narrative
+                sig_evidence = pre.evidence
 
             # ── OB-aware SL/TP ────────────────────────────────────────
             sig_type = ("BREAKER" if inst_a.breaker_block
@@ -267,6 +277,7 @@ class FnOScanner:
                 "atr": round(atr, 2),
                 "htf_bias": inst_a.institutional_bias,
                 "htf_matches_direction": True,
+                "h4_flow": h4,
                 "in_discount": cur < eq,
                 "liquidity_swept": inst_a.liquidity_event.value != "NONE",
                 "fvg_present": inst_a.propulsion_block,
@@ -281,6 +292,8 @@ class FnOScanner:
                 "ob_mid": ob_m,
                 "close": cur,
                 "in_lunch": lunch,
+                "inducement_confirmed": ind_conf,
+                "inducement_level": ind_lvl,
                 "options_pcr": None,
                 "options_oi_bias": None,
                 "max_pain": None,
@@ -294,6 +307,7 @@ class FnOScanner:
                     "liquidity_swept": inst_a.liquidity_event.value != "NONE",
                     "killzone": kz,
                     "ltf_choch": ltf,
+                    "inducement": ind_conf,
                 },
                 "institutional_evidence": inst_a.evidence,
                 "decision_evidence": sig_evidence,

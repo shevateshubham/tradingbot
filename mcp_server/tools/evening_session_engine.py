@@ -169,6 +169,7 @@ class EveningSessionEngine:
                 logger.debug(f"Skip {inst_info['display']} {tf}m — outside active session window ({hm//60:02d}:{hm%60:02d} IST)")
                 return
             sd="LONG" if inst.institutional_bias=="BULLISH" else "SHORT"
+            ind_conf=inst.inducement_confirmed;ind_lvl=inst.inducement_level
             trap=inst.liquidity_event.value in ("SSL_SWEPT","BSL_SWEPT","IND_BULL","IND_BEAR","TURTLE_BULL","TURTLE_BEAR")
             ltf=False
             if len(c)>=6:
@@ -177,15 +178,19 @@ class EveningSessionEngine:
             kz=self.is_kz()
             eq=(max(h[-50:])+min(l[-50:]))/2 if len(h)>=50 else (max(h[-20:])+min(l[-20:]))/2
             poi="BREAKER" if inst.breaker_block else "OB_FVG" if inst.propulsion_block else "OB"
-            claude=await evaluate_setup(symbol=inst_info["display"],segment=inst_info["segment"],timeframe=tf,current_price=cur,closes=c,highs=h,lows=l,volumes=v,inst_bias=inst.institutional_bias,inst_score=inst.total_score,inst_evidence=inst.evidence,liquidity_event=inst.liquidity_event.value,breaker_block=inst.breaker_block,propulsion_block=inst.propulsion_block,mitigation_block=inst.mitigation_block,wyckoff_phase=inst.wyckoff_phase.value,weekly_trend=weekly,daily_structure=daily,h4_flow=h4,in_discount=cur<eq,is_killzone=kz,ltf_choch=ltf,volume_spike=vs)
+            # ── Pre-score: skip Claude for clearly weak setups ─────────────
+            pre=score_decision(weekly_trend=weekly,daily_structure=daily,h4_flow=h4,signal_direction=sd,institutional=inst,poi_type=poi,trap_confirmed=trap,ltf_choch=ltf,volume_spike=vs,in_discount=cur<eq,is_index=False,is_killzone=kz,is_session_open=True,htf_ob_confluence=inst.breaker_block,first_touch_ob=not inst.mitigation_block,ob_already_touched=inst.mitigation_block,segment=inst_info["segment"],inducement_confirmed=ind_conf)
+            if pre.score<50:
+                logger.debug(f"Pre-score {pre.score:.0f}<50 for {inst_info['display']} {tf}m — skip Claude")
+                return
+            claude=await evaluate_setup(symbol=inst_info["display"],segment=inst_info["segment"],timeframe=tf,current_price=cur,closes=c,highs=h,lows=l,volumes=v,inst_bias=inst.institutional_bias,inst_score=inst.total_score,inst_evidence=inst.evidence,liquidity_event=inst.liquidity_event.value,breaker_block=inst.breaker_block,propulsion_block=inst.propulsion_block,mitigation_block=inst.mitigation_block,wyckoff_phase=inst.wyckoff_phase.value,weekly_trend=weekly,daily_structure=daily,h4_flow=h4,in_discount=cur<eq,is_killzone=kz,ltf_choch=ltf,volume_spike=vs,inducement_confirmed=ind_conf,inducement_level=ind_lvl)
             if claude is not None:
                 if not claude.send:logger.info(f"Claude rejected {inst_info['display']} {tf}m: {claude.risk_factors}");return
                 sd=claude.direction;sig_grade=claude.grade;sig_score=claude.confidence
                 sig_narrative=claude.narrative+" | ".join(claude.key_reasons[:2]);sig_evidence=claude.key_reasons+inst.evidence[:2]
             else:
-                dec=score_decision(weekly_trend=weekly,daily_structure=daily,h4_flow=h4,signal_direction=sd,institutional=inst,poi_type=poi,trap_confirmed=trap,ltf_choch=ltf,volume_spike=vs,in_discount=cur<eq,is_index=False,is_killzone=kz,is_session_open=True,htf_ob_confluence=inst.breaker_block,first_touch_ob=not inst.mitigation_block,ob_already_touched=inst.mitigation_block,segment=inst_info["segment"])
-                if not dec.send: return
-                sig_grade=dec.grade;sig_score=dec.score;sig_narrative=dec.narrative;sig_evidence=dec.evidence
+                if not pre.send: return
+                sig_grade=pre.grade;sig_score=pre.score;sig_narrative=pre.narrative;sig_evidence=pre.evidence
             # Determine signal_type from institutional structure
             sig_type=("BREAKER" if inst.breaker_block else "OB_ENTRY" if inst.propulsion_block else "OB_ENTRY" if inst.ob_high else "INSTITUTIONAL")
             # OB-aware SL/TP: use actual OB zone when price is at or near the block
@@ -208,7 +213,7 @@ class EveningSessionEngine:
             sl_pts=abs(entry-sl)
             sess="LONDON" if 13*60+30<=hm<=17*60+30 else "NEW_YORK" if 18*60+30<=hm<=23*60 else "EVENING"
             charges=round(cur*0.0008,2);rr=round(sl_pts*2/sl_pts,1) if sl_pts>0 else 2.0
-            sig={"instrument":f"{inst_info['exchange']}:{inst_info['display']}","base_symbol":inst_info["display"],"exchange":inst_info["exchange"],"segment":inst_info["segment"],"direction":sd,"timeframe":str(tf),"signal_type":sig_type,"score":sig_score,"grade":sig_grade,"entry":round(entry,prec),"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sl_points":round(sl_pts,prec),"sl_percent":round(sl_pts/entry*100,3) if entry>0 else 0,"rr_ratio":rr,"lots":1,"charges":charges,"net_at_tp1":round(sl_pts-charges,2),"net_at_tp2":round(sl_pts*2-charges,2),"net_at_tp3":round(sl_pts*3-charges,2),"atr":round(atr,prec),"htf_bias":inst.institutional_bias,"htf_matches_direction":True,"in_discount":cur<eq,"liquidity_swept":inst.liquidity_event.value!="NONE","fvg_present":inst.propulsion_block,"volume_ratio":round(v[-1]/avg_v,2),"session":sess,"trap_present":trap,"is_killzone":kz,"ltf_choch":ltf,"ob_already_touched":inst.mitigation_block,"ob_high":ob_h,"ob_low":ob_l,"ob_mid":ob_m,"close":cur,"in_lunch":False,"options_pcr":None,"options_oi_bias":None,"max_pain":None,"setup_type":f"{inst.wyckoff_phase.value}|{inst.liquidity_event.value}","narrative":sig_narrative,"htf_timeframe":"4H","confluences":{"htf_bias":inst.institutional_bias,"poi_type":poi,"zone_type":"Discount" if cur<eq else "Premium","liquidity_swept":inst.liquidity_event.value!="NONE","killzone":kz,"ltf_choch":ltf},"institutional_evidence":inst.evidence,"decision_evidence":sig_evidence,"options_signal":None}
+            sig={"instrument":f"{inst_info['exchange']}:{inst_info['display']}","base_symbol":inst_info["display"],"exchange":inst_info["exchange"],"segment":inst_info["segment"],"direction":sd,"timeframe":str(tf),"signal_type":sig_type,"score":sig_score,"grade":sig_grade,"entry":round(entry,prec),"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sl_points":round(sl_pts,prec),"sl_percent":round(sl_pts/entry*100,3) if entry>0 else 0,"rr_ratio":rr,"lots":1,"charges":charges,"net_at_tp1":round(sl_pts-charges,2),"net_at_tp2":round(sl_pts*2-charges,2),"net_at_tp3":round(sl_pts*3-charges,2),"atr":round(atr,prec),"htf_bias":inst.institutional_bias,"htf_matches_direction":True,"h4_flow":h4,"in_discount":cur<eq,"liquidity_swept":inst.liquidity_event.value!="NONE","fvg_present":inst.propulsion_block,"volume_ratio":round(v[-1]/avg_v,2),"session":sess,"trap_present":trap,"is_killzone":kz,"ltf_choch":ltf,"ob_already_touched":inst.mitigation_block,"ob_high":ob_h,"ob_low":ob_l,"ob_mid":ob_m,"close":cur,"in_lunch":False,"inducement_confirmed":ind_conf,"inducement_level":ind_lvl,"options_pcr":None,"options_oi_bias":None,"max_pain":None,"setup_type":f"{inst.wyckoff_phase.value}|{inst.liquidity_event.value}","narrative":sig_narrative,"htf_timeframe":"4H","confluences":{"htf_bias":inst.institutional_bias,"poi_type":poi,"zone_type":"Discount" if cur<eq else "Premium","liquidity_swept":inst.liquidity_event.value!="NONE","killzone":kz,"ltf_choch":ltf,"inducement":ind_conf},"institutional_evidence":inst.evidence,"decision_evidence":sig_evidence,"options_signal":None}
             self._last_sigs[key]=datetime.now(timezone.utc).replace(tzinfo=None)
             logger.info(f"EVENING SIGNAL: {inst_info['display']} {sd} score={sig_score} grade={sig_grade} tf={tf}m sess={sess} type={sig_type} entry={round(entry,prec)} sl={sl} tp2={tp2} atr={round(atr,prec)} ob_h={ob_h} ob_l={ob_l}")
             if self._cb: await self._cb(sig)

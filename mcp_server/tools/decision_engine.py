@@ -43,6 +43,8 @@ def score_decision(
     # Session quality
     is_lunch_hour: bool = False,
     low_volume_session: bool = False,
+    # Inducement confirmation
+    inducement_confirmed: bool = False,
 ) -> TradeDecision:
     """
     Score a potential SMC trade on 0–100 scale using config.py weights.
@@ -85,14 +87,15 @@ def score_decision(
     # ── HTF bias alignment ─────────────────────────────────────────────
     # Map signal_direction to bias labels for comparison
     bull_dir = signal_direction == "LONG"
+    expected_bias = "BULLISH" if bull_dir else "BEARISH"
     htf_aligned = any(
-        t == ("BULLISH" if bull_dir else "BEARISH")
+        t == expected_bias
         for t in (weekly_trend, daily_structure, h4_flow)
         if t != "NEUTRAL"
     )
     htf_conflict = (
-        weekly_trend not in ("NEUTRAL", "BULLISH" if bull_dir else "BEARISH")
-        and daily_structure not in ("NEUTRAL", "BULLISH" if bull_dir else "BEARISH")
+        weekly_trend not in ("NEUTRAL", expected_bias)
+        and daily_structure not in ("NEUTRAL", expected_bias)
     )
 
     if htf_aligned:
@@ -102,6 +105,17 @@ def score_decision(
     if htf_conflict:
         score += SCORE_PENALTIES["htf_conflict"]
         evidence.append(f"HTF conflict {SCORE_PENALTIES['htf_conflict']}")
+
+    # ── H4 flow (dedicated scoring — rewards triple-HTF confluence) ────
+    # H4 scored separately from weekly/daily so triple alignment is rewarded
+    # with an extra bonus and H4-only conflict is penalised independently.
+    if h4_flow != "NEUTRAL":
+        if h4_flow == expected_bias:
+            score += 8
+            evidence.append("H4 flow aligned +8")
+        else:
+            score -= 5
+            evidence.append(f"H4 flow conflict ({h4_flow}) -5")
 
     # ── Premium / Discount zone ────────────────────────────────────────
     zone_aligned = (signal_direction == "LONG" and in_discount) or \
@@ -118,10 +132,16 @@ def score_decision(
         score += SCORE_WEIGHTS["liquidity_swept"]
         evidence.append(f"Liquidity swept ({liq_val}) +{SCORE_WEIGHTS['liquidity_swept']}")
 
-    # ── Killzone ───────────────────────────────────────────────────────
+    # ── Killzone (bonus in / penalty out) ─────────────────────────────
+    # Signals during institutional session opens have far better follow-through.
+    # Penalising non-killzone setups ensures borderline setups that happen to
+    # pass all other criteria don't get sent at low-volume mid-session times.
     if is_killzone:
         score += SCORE_WEIGHTS["killzone"]
         evidence.append(f"In killzone +{SCORE_WEIGHTS['killzone']}")
+    elif not is_lunch_hour:
+        score -= 5
+        evidence.append("Outside killzone -5")
 
     # ── LTF CHOCH ─────────────────────────────────────────────────────
     if ltf_choch:
@@ -183,10 +203,16 @@ def score_decision(
     if trap_confirmed:
         evidence.append("Trap confirmed (entry trigger)")
 
+    # ── Inducement sweep ───────────────────────────────────────────────
+    # Highest-conviction timing signal: retail stops already collected.
+    # Stacks with liquidity_swept but scores separately — they can both fire.
+    if inducement_confirmed:
+        score += 12
+        evidence.append("Inducement sweep confirmed — retail trapped +12")
+
     # ── Institutional bias alignment ───────────────────────────────────
     inst_bias = getattr(institutional, "institutional_bias", "NEUTRAL")
     inst_score = getattr(institutional, "total_score", 0)
-    expected_bias = "BULLISH" if signal_direction == "LONG" else "BEARISH"
     if inst_bias == expected_bias:
         bonus = round(min(8.0, inst_score * 0.1), 1)
         score += bonus

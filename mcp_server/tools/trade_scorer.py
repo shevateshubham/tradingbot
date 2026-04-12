@@ -105,11 +105,14 @@ def score_signal(enriched: dict) -> ScoreResult:
         score += pts
         breakdown["liquidity_swept"] = pts
 
-    # +8: Inside killzone window
+    # +8: Inside killzone window / -5: outside killzone
     if is_killzone:
         pts = SCORE_WEIGHTS["killzone"]
         score += pts
         breakdown["killzone"] = pts
+    elif not in_lunch:
+        score -= 5
+        breakdown["outside_killzone"] = -5
 
     # +8: LTF CHOCH confirmed
     if ltf_choch:
@@ -141,6 +144,23 @@ def score_signal(enriched: dict) -> ScoreResult:
         pts = SCORE_WEIGHTS["volume_ratio"]
         score += pts
         breakdown["volume_ratio"] = pts
+
+    # +12: Inducement sweep confirmed (retail stops collected before real move)
+    inducement_confirmed = enriched.get("inducement_confirmed", False)
+    if inducement_confirmed:
+        score += 12
+        breakdown["inducement_confirmed"] = 12
+
+    # +8/-5: H4 flow alignment (dedicated — rewards triple-HTF confluence)
+    h4_flow = enriched.get("h4_flow", "NEUTRAL")
+    if h4_flow != "NEUTRAL":
+        expected_htf = "BULLISH" if direction == "LONG" else "BEARISH"
+        if h4_flow == expected_htf:
+            score += 8
+            breakdown["h4_aligned"] = 8
+        else:
+            score -= 5
+            breakdown["h4_conflict"] = -5
 
     # ─────────────────────────────────────────────────────────────
     # PENALTIES

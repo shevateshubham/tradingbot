@@ -130,6 +130,8 @@ class InstitutionalAnalysis:
     evidence: List[str] = field(default_factory=list)
     ob_high: Optional[float] = None  # Upper boundary of detected Order Block
     ob_low:  Optional[float] = None  # Lower boundary of detected Order Block
+    inducement_confirmed: bool = False        # Minor liquidity sweep before real move
+    inducement_level: Optional[float] = None  # The swept minor swing level
 
 
 def _detect_fvg(highs: list, lows: list, closes: list, direction: str) -> bool:
@@ -251,6 +253,64 @@ def _detect_liquidity_event(
             return LiquidityEvent.IND_BEAR
 
     return LiquidityEvent.NONE
+
+
+def _detect_inducement(highs: list, lows: list, closes: list, direction: str) -> tuple:
+    """
+    Detect SMC inducement: a minor liquidity sweep confirming the true institutional move.
+
+    Smart money engineers a small false move (inducement) against the intended direction
+    to collect retail stop orders, then reverses sharply.  Detecting this sweep before
+    entry dramatically improves timing and conviction.
+
+    BULLISH inducement:
+        A minor swing low is created, retail shorts enter / longs stop out,
+        price briefly sweeps below that level then closes back above it.
+        → Retail sellers are trapped; real bid has been placed.
+
+    BEARISH inducement:
+        A minor swing high is created, retail longs enter / shorts stop out,
+        price briefly sweeps above that level then closes back below it.
+        → Retail buyers are trapped; real offer has been placed.
+
+    Algorithm:
+        1. Find the most recent minor swing low/high in bars [-20 : -5]
+           (far enough back that the sweep can be detected in recent bars).
+        2. Verify price swept (wicked) through that level in the last 5 bars.
+        3. Verify current close has recovered back past the level.
+
+    Returns (confirmed: bool, swept_level: Optional[float])
+    """
+    n = len(closes)
+    if n < 15:
+        return False, None
+
+    cur = closes[-1]
+
+    if direction == "BULLISH":
+        # Find minor swing lows: bar lower than 2 neighbours on each side
+        for i in range(max(2, n - 20), n - 6):
+            if (lows[i] < lows[i - 1] and lows[i] < lows[i - 2]
+                    and lows[i] < lows[i + 1] and lows[i] < lows[i + 2]):
+                minor_level = lows[i]
+                # Recent wick swept below the minor level
+                swept = any(lows[j] < minor_level for j in range(max(0, n - 5), n))
+                # Current close has recovered above it
+                if swept and cur > minor_level:
+                    return True, minor_level
+    else:  # BEARISH
+        # Find minor swing highs: bar higher than 2 neighbours on each side
+        for i in range(max(2, n - 20), n - 6):
+            if (highs[i] > highs[i - 1] and highs[i] > highs[i - 2]
+                    and highs[i] > highs[i + 1] and highs[i] > highs[i + 2]):
+                minor_level = highs[i]
+                # Recent wick swept above the minor level
+                swept = any(highs[j] > minor_level for j in range(max(0, n - 5), n))
+                # Current close has recovered below it
+                if swept and cur < minor_level:
+                    return True, minor_level
+
+    return False, None
 
 
 def _detect_wyckoff(closes: list, volumes: list) -> WyckoffPhase:
@@ -395,9 +455,25 @@ def analyze_institutional_activity(
     else:
         evidence.append(f"Wyckoff: {wyckoff_phase.value}")
 
-    # ── 9. Final bias ──────────────────────────────────────────────────
+    # ── 9. Inducement check ────────────────────────────────────────────
+    # Strongest timing signal: retail traders were trapped by a minor sweep
+    # before this candle, meaning smart money has already collected their stops.
+    inducement_confirmed, inducement_level = _detect_inducement(highs, lows, closes, direction)
+    if inducement_confirmed:
+        score += 12
+        evidence.append(
+            f"Inducement sweep confirmed @ {inducement_level:.5g} — retail trapped (+12)"
+        )
+
+    # ── 10. Final bias — raised gate to require at least 2 confluences ─
+    # Gate 25 (was 15): a lone OB without any supporting evidence no longer
+    # triggers a signal.  Minimum passing examples:
+    #   OB(20) + volume(5) = 25 ✓
+    #   OB(20) + HTF(10)   = 30 ✓
+    #   OB(20) + FVG(8)    = 28 ✓
+    #   OB(20) alone       = 20 ✗  → NEUTRAL
     score = max(0.0, min(100.0, score))
-    if score >= 15:
+    if score >= 25:
         institutional_bias = direction
     else:
         institutional_bias = "NEUTRAL"
@@ -413,4 +489,6 @@ def analyze_institutional_activity(
         evidence=evidence,
         ob_high=ob_high if ob_found else None,
         ob_low=ob_low if ob_found else None,
+        inducement_confirmed=inducement_confirmed,
+        inducement_level=inducement_level,
     )

@@ -65,6 +65,8 @@ async def evaluate_setup(
     ltf_choch: bool,
     volume_spike: bool,
     options_data: Optional[dict] = None,
+    inducement_confirmed: bool = False,
+    inducement_level: Optional[float] = None,
 ) -> Optional[ClaudeDecision]:
     """
     Ask Claude to evaluate whether this SMC setup is worth signaling.
@@ -116,14 +118,16 @@ INSTITUTIONAL ANALYSIS (score {inst_score:.0f}/100):
   Evidence        : {inst_evidence[:4]}{opts_line}
 
 ENTRY TRIGGERS:
-  Killzone : {is_killzone}
-  LTF CHOCH: {ltf_choch}
-  Vol Spike: {volume_spike}
+  Killzone   : {is_killzone}
+  LTF CHOCH  : {ltf_choch}
+  Vol Spike  : {volume_spike}
+  Inducement : {"CONFIRMED ✓ — swept " + str(round(inducement_level, 5) if inducement_level else "?") + " (retail stops collected)" if inducement_confirmed else "not detected"}
 
 Evaluate strictly. Signal only if:
 1. At least 2 of (Weekly / Daily / H4) agree with entry direction (NEUTRAL counts as non-conflicting)
-2. Institutional evidence present: OB (fresh or mitigated), OB+FVG confluence, Breaker Block, OR institutional score ≥ 20
-3. At least one trigger active: Killzone | LTF CHOCH | Volume Spike | Liquidity Event (any) | Institutional Score ≥ 30
+2. Institutional evidence: OB (fresh preferred), OB+FVG confluence, Breaker Block, OR inst_score ≥ 25
+3. At least one trigger: Killzone | LTF CHOCH | Volume Spike | Liquidity Event | Inducement ✓ | Inst_score ≥ 30
+   (Inducement CONFIRMED is the highest-conviction trigger — weight it heavily)
 
 Respond ONLY with valid JSON, no markdown fences:
 {{"send":true/false,"direction":"LONG or SHORT","grade":"A+ or A or B or C","confidence":50-100,"narrative":"2 sentences max","key_reasons":["reason1","reason2"],"risk_factors":["risk1"]}}"""
@@ -131,7 +135,7 @@ Respond ONLY with valid JSON, no markdown fences:
     resp = None
     last_exc: object = None
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             for attempt in range(3):
                 try:
                     resp = await client.post(

@@ -208,6 +208,7 @@ class LiveDataEngine:
                 logger.debug(f"Skip {sym} {tf}m — OB already mitigated, no breaker/propulsion")
                 return
             sd="LONG" if inst.institutional_bias=="BULLISH" else "SHORT"
+            ind_conf=inst.inducement_confirmed;ind_lvl=inst.inducement_level
             lv=inst_info["lot_size"]
             od={};raw_o=await self._get_oc(sym)
             if raw_o:od=analyze_option_chain(raw_o,cur,lot_size=lv)
@@ -222,18 +223,22 @@ class LiveDataEngine:
             lunch=12*60<=hm<=13*60+30
             eq=(max(h[-50:])+min(l[-50:]))/2 if len(h)>=50 else (max(h[-20:])+min(l[-20:]))/2
             poi="BREAKER" if inst.breaker_block else "OB_FVG" if inst.propulsion_block else "OB"
+            # ── Pre-score: skip Claude for clearly weak setups ─────────────
+            pre=score_decision(weekly_trend=weekly,daily_structure=daily,h4_flow=h4,signal_direction=sd,institutional=inst,poi_type=poi,trap_confirmed=trap,ltf_choch=ltf,volume_spike=vs,in_discount=cur<eq,pcr_confirms=(sd=="LONG" and dir_o=="BULLISH") or (sd=="SHORT" and dir_o=="BEARISH"),near_max_pain=bool(mp and is_near_max_pain(cur,mp)),gex_supports=od.get("gex",0)>0 if sd=="LONG" else od.get("gex",0)<0,options_conflict=(sd=="LONG" and dir_o=="BEARISH") or (sd=="SHORT" and dir_o=="BULLISH"),is_index=True,is_killzone=kz,is_session_open=(not lunch),htf_ob_confluence=inst.breaker_block,first_touch_ob=not inst.mitigation_block,ob_already_touched=inst.mitigation_block,is_lunch_hour=lunch,low_volume_session=not kz and hm>15*60,segment="INDICES",inducement_confirmed=ind_conf)
+            if pre.score<50:
+                logger.debug(f"Pre-score {pre.score:.0f}<50 for {sym} {tf}m — skip Claude")
+                return
             # ── Claude-powered decision ────────────────────────────────
-            claude=await evaluate_setup(symbol=sym,segment="INDICES",timeframe=tf,current_price=cur,closes=c,highs=h,lows=l,volumes=v,inst_bias=inst.institutional_bias,inst_score=inst.total_score,inst_evidence=inst.evidence,liquidity_event=inst.liquidity_event.value,breaker_block=inst.breaker_block,propulsion_block=inst.propulsion_block,mitigation_block=inst.mitigation_block,wyckoff_phase=inst.wyckoff_phase.value,weekly_trend=weekly,daily_structure=daily,h4_flow=h4,in_discount=cur<eq,is_killzone=kz,ltf_choch=ltf,volume_spike=vs,options_data=od or None)
+            claude=await evaluate_setup(symbol=sym,segment="INDICES",timeframe=tf,current_price=cur,closes=c,highs=h,lows=l,volumes=v,inst_bias=inst.institutional_bias,inst_score=inst.total_score,inst_evidence=inst.evidence,liquidity_event=inst.liquidity_event.value,breaker_block=inst.breaker_block,propulsion_block=inst.propulsion_block,mitigation_block=inst.mitigation_block,wyckoff_phase=inst.wyckoff_phase.value,weekly_trend=weekly,daily_structure=daily,h4_flow=h4,in_discount=cur<eq,is_killzone=kz,ltf_choch=ltf,volume_spike=vs,options_data=od or None,inducement_confirmed=ind_conf,inducement_level=ind_lvl)
             if claude is not None:
                 if not claude.send:logger.info(f"Claude rejected {sym} {tf}m: {claude.risk_factors}");return
                 sd=claude.direction;sig_grade=claude.grade;sig_score=claude.confidence
                 sig_narrative=claude.narrative+" | ".join(claude.key_reasons[:2])
                 sig_evidence=claude.key_reasons+inst.evidence[:2]
             else:
-                # Fallback to scoring engine
-                dec=score_decision(weekly_trend=weekly,daily_structure=daily,h4_flow=h4,signal_direction=sd,institutional=inst,poi_type=poi,trap_confirmed=trap,ltf_choch=ltf,volume_spike=vs,in_discount=cur<eq,pcr_confirms=(sd=="LONG" and dir_o=="BULLISH") or (sd=="SHORT" and dir_o=="BEARISH"),near_max_pain=mp and is_near_max_pain(cur,mp),gex_supports=od.get("gex",0)>0 if sd=="LONG" else od.get("gex",0)<0,options_conflict=(sd=="LONG" and dir_o=="BEARISH") or (sd=="SHORT" and dir_o=="BULLISH"),is_index=True,is_killzone=kz,is_session_open=(not lunch),htf_ob_confluence=inst.breaker_block,first_touch_ob=not inst.mitigation_block,ob_already_touched=inst.mitigation_block,is_lunch_hour=lunch,low_volume_session=not kz and hm>15*60,segment="INDICES")
-                if not dec.send:return
-                sig_grade=dec.grade;sig_score=dec.score;sig_narrative=dec.narrative;sig_evidence=dec.evidence
+                # Fallback: use pre-score (already computed above)
+                if not pre.send:return
+                sig_grade=pre.grade;sig_score=pre.score;sig_narrative=pre.narrative;sig_evidence=pre.evidence
             os=None
             if od:
                 from mcp_server.tools.options_strategy import select_strategy
@@ -263,7 +268,7 @@ class LiveDataEngine:
             _cfg=_gs();_risk=_cfg.account_size*_cfg.risk_per_trade_percent/100
             lots=max(1,min(10,int(_risk/(sl_pts*lv)))) if sl_pts>0 and lv>0 else 1
             charges=round(sl_pts*lv*lots*0.0003+850, 2)  # approx brokerage+STT+GST
-            sig={"instrument":f"NSE:{sym}","base_symbol":sym,"exchange":"NSE","segment":"INDICES","direction":sd,"timeframe":str(tf),"signal_type":sig_type,"score":sig_score,"grade":sig_grade,"entry":round(entry,2),"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sl_points":round(sl_pts,2),"sl_percent":round(sl_pts/entry*100,3),"rr_ratio":2.0,"lots":lots,"lot_size":lv,"charges":charges,"net_at_tp1":round(sl_pts*lv*lots-charges,2),"net_at_tp2":round(sl_pts*lv*lots*2-charges,2),"net_at_tp3":round(sl_pts*lv*lots*3-charges,2),"atr":round(atr,2),"htf_bias":inst.institutional_bias,"htf_matches_direction":True,"in_discount":cur<eq,"liquidity_swept":inst.liquidity_event.value!="NONE","fvg_present":inst.propulsion_block,"volume_ratio":round(v[-1]/avg_v,2),"session":"INDIA","trap_present":trap,"is_killzone":kz,"ltf_choch":ltf,"ob_already_touched":inst.mitigation_block,"ob_high":ob_h,"ob_low":ob_l,"ob_mid":ob_m,"close":cur,"in_lunch":lunch,"options_pcr":pcr,"options_oi_bias":dir_o,"max_pain":mp,"gex":od.get("gex"),"setup_type":f"{inst.wyckoff_phase.value}|{inst.liquidity_event.value}","narrative":sig_narrative,"htf_timeframe":"4H","confluences":{"htf_bias":inst.institutional_bias,"poi_type":poi,"zone_type":"Discount" if cur<eq else "Premium","liquidity_swept":inst.liquidity_event.value!="NONE","killzone":kz,"ltf_choch":ltf},"institutional_evidence":inst.evidence,"decision_evidence":sig_evidence,"options_signal":os}
+            sig={"instrument":f"NSE:{sym}","base_symbol":sym,"exchange":"NSE","segment":"INDICES","direction":sd,"timeframe":str(tf),"signal_type":sig_type,"score":sig_score,"grade":sig_grade,"entry":round(entry,2),"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sl_points":round(sl_pts,2),"sl_percent":round(sl_pts/entry*100,3),"rr_ratio":2.0,"lots":lots,"lot_size":lv,"charges":charges,"net_at_tp1":round(sl_pts*lv*lots-charges,2),"net_at_tp2":round(sl_pts*lv*lots*2-charges,2),"net_at_tp3":round(sl_pts*lv*lots*3-charges,2),"atr":round(atr,2),"htf_bias":inst.institutional_bias,"htf_matches_direction":True,"h4_flow":h4,"in_discount":cur<eq,"liquidity_swept":inst.liquidity_event.value!="NONE","fvg_present":inst.propulsion_block,"volume_ratio":round(v[-1]/avg_v,2),"session":"INDIA","trap_present":trap,"is_killzone":kz,"ltf_choch":ltf,"ob_already_touched":inst.mitigation_block,"ob_high":ob_h,"ob_low":ob_l,"ob_mid":ob_m,"close":cur,"in_lunch":lunch,"inducement_confirmed":ind_conf,"inducement_level":ind_lvl,"options_pcr":pcr,"options_oi_bias":dir_o,"max_pain":mp,"gex":od.get("gex"),"setup_type":f"{inst.wyckoff_phase.value}|{inst.liquidity_event.value}","narrative":sig_narrative,"htf_timeframe":"4H","confluences":{"htf_bias":inst.institutional_bias,"poi_type":poi,"zone_type":"Discount" if cur<eq else "Premium","liquidity_swept":inst.liquidity_event.value!="NONE","killzone":kz,"ltf_choch":ltf,"inducement":ind_conf},"institutional_evidence":inst.evidence,"decision_evidence":sig_evidence,"options_signal":os}
             self._last_sigs[key]=datetime.now(timezone.utc).replace(tzinfo=None)
             logger.info(f"SIGNAL: NSE:{sym} {sd} score={sig_score:.0f} grade={sig_grade} tf={tf}m type={sig_type} entry={round(entry,2)} sl={sl} tp2={tp2} lots={lots} atr={round(atr,2)} ob_h={ob_h} ob_l={ob_l} (claude={'yes' if claude else 'fallback'})")
             if self._cb:await self._cb(sig)
@@ -278,6 +283,7 @@ class LiveDataEngine:
         price_summary=", ".join(f"{sym}={prices[sym]['price']:.0f}" for sym in ("NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY") if sym in prices)
         candle_counts={sym:{tf:self._b[sym][tf].count for tf in TIMEFRAMES} for inst in INDICES for sym in [inst["symbol"]]}
         logger.info(f"Live tick @ {now.strftime('%H:%M:%S')} IST | {price_summary} | candles={candle_counts}")
+        tasks=[]
         for inst in INDICES:
             sym=inst["symbol"];data=prices.get(sym)
             if not data or not data.get("price"):continue
@@ -285,7 +291,9 @@ class LiveDataEngine:
             for tf in TIMEFRAMES:
                 closed=self._b[sym][tf].update(p,now,vol)
                 if closed:
-                    await self._process(sym,tf,inst)
+                    tasks.append(self._process(sym,tf,inst))
+        if tasks:
+            await asyncio.gather(*tasks,return_exceptions=True)
 
     async def run(self):
         self._running=True
