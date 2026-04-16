@@ -1,0 +1,14 @@
+[build]
+builder = "NIXPACKS"
+buildCommand = "pip install -r trading_pipeline/requirements.txt"
+
+[deploy]
+startCommand = "python trading_pipeline/main.py"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+healthcheckPath = "/health"
+healthcheckTimeout = 300
+sleepApplication = false
+
+[environments.production]
+PORT = "${{PORT}}"

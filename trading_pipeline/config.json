@@ -1,0 +1,36 @@
+{
+  "markets": ["NIFTY", "FOREX", "CRYPTO", "GOLD"],
+  "symbols": {
+    "NIFTY":  ["RELIANCE.NS", "HDFCBANK.NS", "TCS.NS", "INFY.NS", "ICICIBANK.NS"],
+    "FOREX":  ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "AUDUSD=X"],
+    "CRYPTO": ["BTC-USD", "ETH-USD"],
+    "GOLD":   ["GC=F"]
+  },
+  "timeframes": ["1m", "5m", "15m"],
+  "scoring": {
+    "context_weight": 0.40,
+    "setup_weight":   0.40,
+    "trigger_weight": 0.20,
+    "min_confidence": 70,
+    "min_rr_ratio":   2.0,
+    "max_sl_percent": 2.0
+  },
+  "session_times": {
+    "NIFTY":  { "open": "09:15", "close": "15:30", "timezone": "Asia/Kolkata", "days": [0,1,2,3,4] },
+    "FOREX":  { "open": "00:00", "close": "23:59", "timezone": "UTC",          "days": [0,1,2,3,4] },
+    "CRYPTO": { "open": "00:00", "close": "23:59", "timezone": "UTC",          "days": [0,1,2,3,4,5,6] },
+    "GOLD":   { "open": "18:00", "close": "17:00", "timezone": "America/New_York", "days": [0,1,2,3,4] }
+  },
+  "telegram": {
+    "bot_token": "",
+    "chat_id": ""
+  },
+  "disabled_symbols": [],
+  "pipeline_interval_minutes": 0,
+  "min_bars_required": 30,
+  "volume_spike_multiplier": 1.5,
+  "displacement_ratio_threshold": 0.70,
+  "ob_lookback_bars": 30,
+  "swing_lookback_bars": 50,
+  "fractal_side_bars": 3
+}

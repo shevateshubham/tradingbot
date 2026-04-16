@@ -1,0 +1,31 @@
+# Trading Pipeline — Dependencies
+# All versions pinned for reproducible Railway deployments
+
+# Market data (free APIs, no key required for basic usage)
+yfinance==0.2.40
+ccxt==4.3.68
+
+# Telegram bot
+python-telegram-bot[job-queue]==21.3
+
+# Scheduling (weekly review)
+apscheduler==3.10.4
+
+# HTTP client (Telegram API direct calls)
+httpx==0.27.0
+
+# Timezone handling
+pytz==2024.1
+python-dateutil==2.9.0.post0
+
+# Numerical (ATR, price math)
+numpy==1.26.4
+
+# Retry logic (for API calls)
+tenacity==8.3.0
+
+# Structured logging
+structlog==24.2.0
+
+# Data manipulation (yfinance returns DataFrames)
+pandas==2.2.2
