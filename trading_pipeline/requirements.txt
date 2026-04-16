@@ -2,7 +2,7 @@
 # All versions pinned for reproducible Railway deployments
 
 # Market data
-tvDatafeed==2.0.0     # TradingView data — NIFTY/FOREX/GOLD/CRYPTO (paid plan = real-time)
+git+https://github.com/rongardF/tvdatafeed.git  # TradingView data — NIFTY/FOREX/GOLD/CRYPTO
 ccxt==4.3.68          # OKX fallback for CRYPTO
 requests==2.32.3      # HTTP client for API calls
 pandas==2.2.2         # tvDatafeed returns DataFrames
