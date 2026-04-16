@@ -3,12 +3,11 @@ Bot 1: Data Collector Bot
 Fetches OHLCV data ONLY for the selected market/segment.
 
 Data sources:
-  - NIFTY/FOREX/GOLD : Twelve Data API (free, 800 calls/day, no datacenter block)
-                       Set TWELVE_DATA_API_KEY env var (free at twelvedata.com)
-  - CRYPTO           : OKX via ccxt (no API key, globally accessible)
+  - NIFTY/FOREX/GOLD/CRYPTO : TradingView via tvDatafeed
+      Credentials: TRADINGVIEW_USERNAME + TRADINGVIEW_PASSWORD env vars
+      (TradingView paid plan gives real-time data for all markets)
 
-Yahoo Finance is NOT used — its US-based servers block Railway's datacenter IPs
-with HTTP 429 regardless of headers/cookies.
+  - CRYPTO fallback          : OKX via ccxt if TradingView creds not set
 """
 
 from __future__ import annotations
@@ -24,42 +23,47 @@ from utils.market_hours import is_market_open, get_closed_markets_message
 
 logger = get_logger("bot1")
 
-# ── Twelve Data ────────────────────────────────────────────────────────────────
+# ── TradingView symbol map ─────────────────────────────────────────────────────
+# Format: config_symbol → (tv_symbol, tv_exchange)
 
-TWELVE_DATA_BASE = "https://api.twelvedata.com/time_series"
-
-# Map config symbols → Twelve Data symbols
-TWELVE_DATA_SYMBOLS: dict[str, str] = {
-    # NIFTY stocks
-    "RELIANCE.NS":  "RELIANCE:NSE",
-    "HDFCBANK.NS":  "HDFCBANK:NSE",
-    "TCS.NS":       "TCS:NSE",
-    "INFY.NS":      "INFY:NSE",
-    "ICICIBANK.NS": "ICICIBANK:NSE",
-    "WIPRO.NS":     "WIPRO:NSE",
-    "SBIN.NS":      "SBIN:NSE",
+TV_SYMBOL_MAP: dict[str, tuple[str, str]] = {
+    # NIFTY F&O stocks (NSE)
+    "RELIANCE.NS":  ("RELIANCE",  "NSE"),
+    "HDFCBANK.NS":  ("HDFCBANK",  "NSE"),
+    "TCS.NS":       ("TCS",       "NSE"),
+    "INFY.NS":      ("INFY",      "NSE"),
+    "ICICIBANK.NS": ("ICICIBANK", "NSE"),
+    "WIPRO.NS":     ("WIPRO",     "NSE"),
+    "SBIN.NS":      ("SBIN",      "NSE"),
+    "AXISBANK.NS":  ("AXISBANK",  "NSE"),
+    "BAJFINANCE.NS":("BAJFINANCE","NSE"),
+    "KOTAKBANK.NS": ("KOTAKBANK", "NSE"),
     # Forex
-    "EURUSD=X":     "EUR/USD",
-    "GBPUSD=X":     "GBP/USD",
-    "USDJPY=X":     "USD/JPY",
-    "AUDUSD=X":     "AUD/USD",
-    "USDCAD=X":     "USD/CAD",
+    "EURUSD=X":     ("EURUSD",    "FX"),
+    "GBPUSD=X":     ("GBPUSD",    "FX"),
+    "USDJPY=X":     ("USDJPY",    "FX"),
+    "AUDUSD=X":     ("AUDUSD",    "FX"),
+    "USDCAD=X":     ("USDCAD",    "FX"),
     # Gold / Commodities
-    "GC=F":         "XAU/USD",
-    "SI=F":         "XAG/USD",
+    "GC=F":         ("XAUUSD",    "OANDA"),
+    "SI=F":         ("XAGUSD",    "OANDA"),
+    # Crypto
+    "BTC-USD":      ("BTCUSDT",   "BINANCE"),
+    "ETH-USD":      ("ETHUSDT",   "BINANCE"),
+    "BNB-USD":      ("BNBUSDT",   "BINANCE"),
+    "SOL-USD":      ("SOLUSDT",   "BINANCE"),
 }
 
-# Map config timeframe → Twelve Data interval
-TWELVE_DATA_TF: dict[str, str] = {
-    "1m":  "1min",
-    "5m":  "5min",
-    "15m": "15min",
-    "1h":  "1h",
-    "4h":  "4h",
-    "1d":  "1day",
+TV_INTERVAL_MAP = {
+    "1m":  "in_1_minute",
+    "5m":  "in_5_minute",
+    "15m": "in_15_minute",
+    "1h":  "in_1_hour",
+    "4h":  "in_4_hour",
+    "1d":  "in_daily",
 }
 
-# ── OKX (CRYPTO) ───────────────────────────────────────────────────────────────
+# ── OKX fallback for CRYPTO ───────────────────────────────────────────────────
 
 CCXT_SYMBOL_MAP: dict[str, str] = {
     "BTC-USD": "BTC/USDT",
@@ -68,79 +72,82 @@ CCXT_SYMBOL_MAP: dict[str, str] = {
     "SOL-USD": "SOL/USDT",
 }
 
+# ── TradingView session cache ─────────────────────────────────────────────────
 
-# ── Fetchers ───────────────────────────────────────────────────────────────────
+_TV_CLIENT = None
 
-def _fetch_twelve_data(symbol: str, timeframes: list[str], min_bars: int) -> dict:
-    """
-    Fetch OHLCV from Twelve Data API.
-    Requires TWELVE_DATA_API_KEY environment variable (free at twelvedata.com).
-    800 API credits/day on free tier — 1 credit per request.
-    """
-    import requests
 
-    api_key = os.environ.get("TWELVE_DATA_API_KEY", "")
-    if not api_key:
-        return {"fetch_status": "error", "error": "TWELVE_DATA_API_KEY not set"}
+def _get_tv_client():
+    """Return cached TvDatafeed client. Logs in with credentials if available."""
+    global _TV_CLIENT
+    if _TV_CLIENT is not None:
+        return _TV_CLIENT
 
-    td_symbol = TWELVE_DATA_SYMBOLS.get(symbol)
-    if not td_symbol:
-        return {"fetch_status": "error", "error": f"No Twelve Data mapping for {symbol}"}
+    from tvDatafeed import TvDatafeed
+    username = os.environ.get("TRADINGVIEW_USERNAME", "")
+    password = os.environ.get("TRADINGVIEW_PASSWORD", "")
 
+    if username and password:
+        logger.info("TvDatafeed: logging in with credentials (real-time data)")
+        _TV_CLIENT = TvDatafeed(username=username, password=password)
+    else:
+        logger.info("TvDatafeed: no credentials, using delayed data")
+        _TV_CLIENT = TvDatafeed()
+
+    return _TV_CLIENT
+
+
+# ── Fetchers ──────────────────────────────────────────────────────────────────
+
+def _fetch_tradingview(symbol: str, timeframes: list[str], min_bars: int) -> dict:
+    """Fetch OHLCV from TradingView via tvDatafeed."""
+    try:
+        from tvDatafeed import Interval
+    except ImportError:
+        return {"fetch_status": "error", "error": "tvDatafeed not installed"}
+
+    tv_entry = TV_SYMBOL_MAP.get(symbol)
+    if not tv_entry:
+        return {"fetch_status": "error", "error": f"No TradingView mapping for {symbol}"}
+
+    tv_symbol, tv_exchange = tv_entry
+    tv = _get_tv_client()
     tf_data: dict = {}
-    session = requests.Session()
-    session.headers["User-Agent"] = "TradingBot/1.0"
 
     for tf in timeframes:
-        td_interval = TWELVE_DATA_TF.get(tf)
-        if not td_interval:
+        interval_name = TV_INTERVAL_MAP.get(tf)
+        if not interval_name:
             tf_data[tf] = None
             continue
 
+        interval = getattr(Interval, interval_name)
         try:
-            resp = session.get(
-                TWELVE_DATA_BASE,
-                params={
-                    "symbol":     td_symbol,
-                    "interval":   td_interval,
-                    "apikey":     api_key,
-                    "outputsize": 100,
-                    "order":      "ASC",
-                },
-                timeout=15,
+            df = tv.get_hist(
+                symbol   = tv_symbol,
+                exchange = tv_exchange,
+                interval = interval,
+                n_bars   = 100,
             )
 
-            if resp.status_code != 200:
-                logger.warning(f"{symbol} {tf}: Twelve Data HTTP {resp.status_code}")
+            if df is None or len(df) < min_bars:
+                logger.warning(f"{symbol} {tf}: only {len(df) if df is not None else 0} bars (need {min_bars})")
                 tf_data[tf] = None
                 continue
 
-            data = resp.json()
-
-            if data.get("status") == "error":
-                logger.warning(f"{symbol} {tf}: Twelve Data error — {data.get('message')}")
-                tf_data[tf] = None
-                continue
-
-            values = data.get("values", [])
-            if len(values) < min_bars:
-                logger.warning(f"{symbol} {tf}: only {len(values)} bars (need {min_bars})")
-                tf_data[tf] = None
-                continue
-
+            # tvDatafeed returns a DataFrame with columns: open, high, low, close, volume
             tf_data[tf] = {
-                "opens":      [float(v["open"])   for v in values],
-                "highs":      [float(v["high"])   for v in values],
-                "lows":       [float(v["low"])    for v in values],
-                "closes":     [float(v["close"])  for v in values],
-                "volumes":    [float(v.get("volume", 0) or 0) for v in values],
-                "timestamps": [v["datetime"]      for v in values],
-                "count":      len(values),
+                "opens":      df["open"].tolist(),
+                "highs":      df["high"].tolist(),
+                "lows":       df["low"].tolist(),
+                "closes":     df["close"].tolist(),
+                "volumes":    df["volume"].tolist(),
+                "timestamps": [str(ts) for ts in df.index.tolist()],
+                "count":      len(df),
             }
-            time.sleep(0.2)   # Stay within Twelve Data rate limits
+            time.sleep(0.3)  # Respect TradingView rate limits
 
         except Exception as e:
-            logger.error(f"{symbol} {tf} Twelve Data error: {e}")
+            logger.error(f"{symbol} {tf} tvDatafeed error: {e}")
             tf_data[tf] = None
 
     current_price = None
@@ -214,10 +221,22 @@ def _fetch_ccxt(symbol: str, timeframes: list[str], min_bars: int) -> dict:
 
 
 def _fetch_symbol(symbol: str, market: str, timeframes: list[str], min_bars: int) -> dict:
-    """Dispatch to correct fetcher based on market type."""
+    """
+    Use TradingView for all markets if credentials are set.
+    Fall back to OKX/ccxt for CRYPTO if TradingView is unavailable.
+    """
+    tv_available = bool(
+        os.environ.get("TRADINGVIEW_USERNAME") or
+        TV_SYMBOL_MAP.get(symbol)  # Even without login, try TV for known symbols
+    )
+
+    if tv_available and symbol in TV_SYMBOL_MAP:
+        return _fetch_tradingview(symbol, timeframes, min_bars)
+
     if market == "CRYPTO":
         return _fetch_ccxt(symbol, timeframes, min_bars)
-    return _fetch_twelve_data(symbol, timeframes, min_bars)
+
+    return {"fetch_status": "error", "error": f"No data source configured for {symbol}"}
 
 
 class DataCollectorBot:
@@ -251,7 +270,6 @@ class DataCollectorBot:
             pipeline_dict["pipeline_error"] = f"No symbols for {market}"
             return pipeline_dict
 
-        # Warn if market is closed (but don't block — user explicitly requested)
         if market != "ALL" and not is_market_open(market, config):
             logger.info(f"{market} is closed but user requested scan")
             pipeline_dict["market_closed_warning"] = get_closed_markets_message(market, config)

@@ -2,8 +2,10 @@
 # All versions pinned for reproducible Railway deployments
 
 # Market data
-ccxt==4.3.68          # CRYPTO via OKX (no API key)
-requests==2.32.3      # Twelve Data API (NIFTY/FOREX/GOLD)
+tvDatafeed==2.0.0     # TradingView data — NIFTY/FOREX/GOLD/CRYPTO (paid plan = real-time)
+ccxt==4.3.68          # OKX fallback for CRYPTO
+requests==2.32.3      # HTTP client for API calls
+pandas==2.2.2         # tvDatafeed returns DataFrames
 
 # Telegram bot
 python-telegram-bot[job-queue]==21.3
@@ -27,5 +29,3 @@ tenacity==8.3.0
 # Structured logging
 structlog==24.2.0
 
-# Data manipulation
-pandas==2.2.2
