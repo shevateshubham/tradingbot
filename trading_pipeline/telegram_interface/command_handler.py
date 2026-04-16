@@ -1,7 +1,14 @@
 """
 telegram_interface/command_handler.py — Telegram bot command handlers.
-Handles /trade, /markets, /status, /stop, /help, /start.
-User picks a market → pipeline runs for ONLY that market.
+
+Flow:
+  /trade CRYPTO
+    → scans all CRYPTO symbols (Bots 1-5, NO auto-send)
+    → shows ranked list of symbols with inline buttons
+  User taps [🟢 BTC-USD 79% A]
+    → sends full trade signal for that symbol only (Bot 6)
+
+This way the user chooses which setup to act on.
 """
 
 from __future__ import annotations
@@ -18,35 +25,23 @@ from utils.config_loader import load_config
 from utils.logger import get_logger
 from utils.market_hours import is_market_open, get_closed_markets_message, get_open_markets
 from telegram_interface.session_store import (
-    load_session, update_last_run, set_paused, is_paused, get_last_market
+    load_session, update_last_run, set_paused, is_paused, get_last_market,
 )
 
 logger = get_logger("telegram")
 
 VALID_MARKETS = {"NIFTY", "FOREX", "CRYPTO", "GOLD", "ALL"}
+TRADES_DIR    = Path(__file__).parent.parent / "data" / "trades"
 
-TRADES_DIR = Path(__file__).parent.parent / "data" / "trades"
+# bot_data key for storing last scan result per chat
+_SCAN_KEY = "last_scan_{chat_id}"
 
 
-def _rescan_keyboard(market: str) -> InlineKeyboardMarkup:
-    """Inline keyboard after a scan result."""
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🔄 Re-scan", callback_data=f"rescan:{market}"),
-            InlineKeyboardButton("📊 Weekly Stats", callback_data="weekly_stats"),
-        ],
-        [
-            InlineKeyboardButton("📋 Markets", callback_data="markets"),
-            InlineKeyboardButton("⏹ Stop", callback_data="stop"),
-        ],
-    ])
-
+# ── Keyboards ──────────────────────────────────────────────────────────────────
 
 def _markets_keyboard(config: dict) -> InlineKeyboardMarkup:
-    """Inline buttons for each available market."""
     open_markets = get_open_markets(config)
-    buttons = []
-    row = []
+    buttons, row = [], []
     for market in config.get("markets", []):
         label = f"{'✅' if market in open_markets else '🔒'} {market}"
         row.append(InlineKeyboardButton(label, callback_data=f"trade:{market}"))
@@ -59,63 +54,165 @@ def _markets_keyboard(config: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
-def _run_pipeline(market: str) -> dict:
+def _symbol_selection_keyboard(market: str, scored_symbols: list[tuple]) -> InlineKeyboardMarkup:
     """
-    Synchronous pipeline orchestrator — runs all 6 bots in sequence.
-    Imported here to avoid circular imports. Called in a thread executor.
+    Build an inline keyboard with one button per symbol, ranked by confidence.
+    scored_symbols: list of (sym, action, confidence, grade, setup_type)
     """
-    # Import here to avoid circular imports at module load time
+    buttons = []
+    for sym, action, conf, grade, setup_type in scored_symbols:
+        if action == "TRADE":
+            emoji = "🟢"
+        elif action == "WATCH":
+            emoji = "👀"
+        else:
+            emoji = "❌"
+        # callback_data max 64 bytes — sym + market well within limit
+        label = f"{emoji} {sym}  {conf:.0f}%  [{grade}]"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"signal:{market}:{sym}")])
+
+    # Footer controls
+    buttons.append([
+        InlineKeyboardButton("🔄 Re-scan", callback_data=f"rescan:{market}"),
+        InlineKeyboardButton("📋 Markets", callback_data="markets"),
+    ])
+    return InlineKeyboardMarkup(buttons)
+
+
+def _after_signal_keyboard(market: str) -> InlineKeyboardMarkup:
+    """Keyboard shown after a signal detail is sent."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔄 Re-scan", callback_data=f"rescan:{market}"),
+            InlineKeyboardButton("📋 Markets", callback_data="markets"),
+        ],
+        [
+            InlineKeyboardButton("📊 Weekly Stats", callback_data="weekly_stats"),
+            InlineKeyboardButton("⏹ Stop",          callback_data="stop"),
+        ],
+    ])
+
+
+# ── Pipeline runner (Bots 1-5 only, no auto-notification) ─────────────────────
+
+def _run_pipeline_scoring(market: str) -> dict:
+    """
+    Run Bots 1-5 only. Returns enriched pipeline dict with decisions per symbol.
+    Bot 6 (notification) is NOT called here — the user selects which signal to send.
+    """
     from bots.bot1_data_collector import DataCollectorBot
     from bots.bot2_context        import ContextBot
     from bots.bot3_setup          import SetupBot
     from bots.bot4_trigger        import TriggerBot
     from bots.bot5_decision       import DecisionBot
-    from bots.bot6_notification   import NotificationBot
 
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    run_id   = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     pipeline = {
         "run_id":          run_id,
         "timestamp":       datetime.now(timezone.utc).isoformat(),
         "selected_market": market,
     }
-
     pipeline = DataCollectorBot().run(pipeline)
     pipeline = ContextBot().run(pipeline)
     pipeline = SetupBot().run(pipeline)
     pipeline = TriggerBot().run(pipeline)
     pipeline = DecisionBot().run(pipeline)
-    pipeline = NotificationBot().run(pipeline)
-
     return pipeline
 
 
+def _extract_ranked_symbols(pipeline: dict) -> list[tuple]:
+    """
+    Extract symbols with their scores from the pipeline result.
+    Returns list of (sym, action, confidence, grade, setup_type) sorted by confidence desc.
+    """
+    ranked = []
+    for sym, sym_data in pipeline.get("symbols", {}).items():
+        if sym_data.get("fetch_status") != "ok":
+            continue
+        dec    = sym_data.get("decision", {})
+        action = dec.get("action", "NO_TRADE")
+        conf   = dec.get("confidence_score", 0.0)
+        grade  = dec.get("grade", "C")
+        setup  = sym_data.get("setup", {}).get("setup_type", "—")
+        ranked.append((sym, action, conf, grade, setup))
+
+    ranked.sort(key=lambda x: x[2], reverse=True)
+    return ranked
+
+
+def _build_scan_summary(market: str, ranked: list[tuple], pipeline: dict) -> str:
+    """Build the scan results summary message."""
+    timestamp = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    lines = [f"📊 <b>{market} Scan — {timestamp}</b>\n"]
+
+    if not ranked:
+        lines.append("No data fetched. Market may be closed or API unavailable.")
+        return "\n".join(lines)
+
+    for sym, action, conf, grade, setup_type in ranked:
+        sym_data   = pipeline["symbols"].get(sym, {})
+        htf_bias   = sym_data.get("context", {}).get("htf_bias", "?")
+        direction  = sym_data.get("setup", {}).get("direction", "?")
+        swept      = sym_data.get("setup", {}).get("liquidity_swept", False)
+        bos        = sym_data.get("trigger", {}).get("ltf_bos", False)
+        trap       = sym_data.get("setup", {}).get("trap_detected", False)
+
+        if action == "TRADE":
+            status = "🟢 TRADE"
+        elif action == "WATCH":
+            status = "👀 WATCH"
+        else:
+            status = "❌ SKIP"
+
+        tags = []
+        if swept: tags.append("Sweep✓")
+        if bos:   tags.append("BOS✓")
+        if trap:  tags.append("⚠️Trap")
+
+        tag_str = "  " + " ".join(tags) if tags else ""
+
+        lines.append(
+            f"<b>{sym}</b>  {status}  {conf:.0f}% [{grade}]\n"
+            f"  HTF: {htf_bias} | Dir: {direction} | {setup_type}{tag_str}"
+        )
+
+    actionable = sum(1 for _, a, _, _, _ in ranked if a in ("TRADE", "WATCH"))
+    lines.append(
+        f"\n<i>{actionable} actionable setup{'s' if actionable != 1 else ''} found.</i>\n"
+        f"👇 Tap a symbol for the full trade signal:"
+    )
+    return "\n".join(lines)
+
+
+# ── Command handlers ───────────────────────────────────────────────────────────
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler: /start"""
-    config = load_config()
+    config   = load_config()
     keyboard = _markets_keyboard(config)
     await update.message.reply_text(
         "👋 <b>Trading Pipeline Bot</b>\n\n"
-        "I analyze markets using Smart Money Concepts (SMC):\n"
+        "Analyzes markets using Smart Money Concepts (SMC):\n"
         "Order Blocks · FVGs · Liquidity Sweeps · BOS · No retail indicators.\n\n"
+        "<b>How it works:</b>\n"
+        "1️⃣ Pick a market below (or /trade CRYPTO)\n"
+        "2️⃣ Bot scans all symbols, ranks setups by confidence\n"
+        "3️⃣ Tap any symbol to get the full trade signal\n\n"
         "<b>Commands:</b>\n"
-        "/trade &lt;MARKET&gt; — Scan a market (NIFTY, FOREX, CRYPTO, GOLD, ALL)\n"
-        "/markets — Show available markets with status\n"
-        "/status — Last run + weekly performance\n"
-        "/stop — Pause scanning\n"
-        "/help — Show this message\n\n"
-        "👇 Pick a market to start:",
+        "/trade &lt;MARKET&gt; — Scan (NIFTY · FOREX · CRYPTO · GOLD · ALL)\n"
+        "/markets — Market open/closed status\n"
+        "/status  — Today's performance\n"
+        "/stop    — Pause/resume\n\n"
+        "👇 Pick a market:",
         parse_mode="HTML",
         reply_markup=keyboard,
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler: /help"""
     await start_command(update, context)
 
 
 async def markets_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler: /markets — show available markets with open/closed status."""
     config = load_config()
     open_m = get_open_markets(config)
     lines  = ["📊 <b>Market Status</b>\n"]
@@ -123,102 +220,95 @@ async def markets_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         status = "✅ OPEN" if market in open_m else "🔒 CLOSED"
         syms   = config.get("symbols", {}).get(market, [])
         lines.append(f"<b>{market}</b> {status} — {len(syms)} symbols")
-    lines.append("\nSend /trade &lt;MARKET&gt; to scan.")
-    keyboard = _markets_keyboard(config)
+    lines.append("\n👇 Select a market to scan:")
     await update.message.reply_text(
-        "\n".join(lines), parse_mode="HTML", reply_markup=keyboard
+        "\n".join(lines), parse_mode="HTML",
+        reply_markup=_markets_keyboard(config),
     )
 
 
 async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler: /trade <MARKET>"""
-    chat_id = update.effective_chat.id
-    config  = load_config()
+    """
+    /trade <MARKET>
+    Step 1: scan all symbols → show ranked selection list.
+    Step 2 (via button_callback): user taps a symbol → full signal sent.
+    """
+    # Determine if called from a message or a button callback
+    if update.callback_query:
+        send = update.callback_query.message.reply_text
+        chat_id = update.callback_query.message.chat_id
+    else:
+        send = update.message.reply_text
+        chat_id = update.message.chat_id
+
+    config = load_config()
 
     if is_paused(chat_id):
-        await update.message.reply_text(
-            "⏸ Bot is paused. Send /stop to unpause, then retry."
-        )
+        await send("⏸ Bot is paused. Send /stop to unpause.")
         return
 
     args   = context.args or []
     market = args[0].upper() if args else get_last_market(chat_id) or "CRYPTO"
 
     if market not in VALID_MARKETS:
-        markets_str = ", ".join(VALID_MARKETS)
-        await update.message.reply_text(
+        await send(
             f"❌ Unknown market: <b>{market}</b>\n"
-            f"Valid options: {markets_str}",
+            f"Valid: {', '.join(sorted(VALID_MARKETS))}",
             parse_mode="HTML",
         )
         return
 
-    # Warn if closed but still allow (user explicitly requested)
+    # Warn if closed (but scan anyway — user explicitly asked)
     warning = ""
     if market != "ALL" and not is_market_open(market, config):
         warning = f"\n⚠️ {get_closed_markets_message(market, config)}"
 
-    syms = config.get("symbols", {}).get(market, []) if market != "ALL" else \
-           [s for syms in config.get("symbols", {}).values() for s in syms]
-    disabled = set(config.get("disabled_symbols", []))
+    syms = (
+        config.get("symbols", {}).get(market, []) if market != "ALL"
+        else [s for ss in config.get("symbols", {}).values() for s in ss]
+    )
+    disabled    = set(config.get("disabled_symbols", []))
     active_syms = [s for s in syms if s not in disabled]
 
-    await update.message.reply_text(
+    scanning_msg = await send(
         f"⏳ Scanning <b>{market}</b> ({len(active_syms)} symbols)...{warning}\n"
-        f"Running: Data → Context → Setup → Trigger → Decision → Notify",
+        f"Pipeline: Data → Context → Setup → Trigger → Decision",
         parse_mode="HTML",
     )
 
-    # Run pipeline in a thread (blocking I/O)
+    # Run Bots 1-5 in a thread (blocking I/O must not block event loop)
     try:
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, _run_pipeline, market)
+        loop   = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _run_pipeline_scoring, market)
     except Exception as e:
         logger.error(f"Pipeline error for {market}: {e}")
-        await update.message.reply_text(f"❌ Pipeline error: {e}")
+        await send(f"❌ Pipeline error: {e}")
         return
 
     update_last_run(chat_id, market)
 
-    # Summary message
-    summary = result.get("pipeline_summary", {})
-    trades  = summary.get("trades", 0)
-    watches = summary.get("watches", 0)
-    notified_t = summary.get("notifications_sent_trade", 0)
-    notified_w = summary.get("notifications_sent_watch", 0)
+    # Store scan result in bot_data so button_callback can retrieve it
+    key = _SCAN_KEY.format(chat_id=chat_id)
+    context.application.bot_data[key] = result
 
-    if trades == 0 and watches == 0:
-        msg = (
-            f"✅ <b>Scan complete — {market}</b>\n\n"
-            f"No trade setups found right now.\n"
-            f"Symbols scanned: {len(active_syms)}\n"
-            f"Market session: {_session_label()}"
-        )
-    else:
-        msg = (
-            f"✅ <b>Scan complete — {market}</b>\n\n"
-            f"🟢 TRADE signals: {notified_t}\n"
-            f"👀 WATCH alerts:  {notified_w}\n"
-            f"Symbols scanned: {len(active_syms)}"
-        )
+    # Build ranked list and summary
+    ranked  = _extract_ranked_symbols(result)
+    summary = _build_scan_summary(market, ranked, result)
+    keyboard = _symbol_selection_keyboard(market, ranked)
 
-    await update.message.reply_text(
-        msg, parse_mode="HTML", reply_markup=_rescan_keyboard(market)
-    )
+    await send(summary, parse_mode="HTML", reply_markup=keyboard)
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler: /status — show last run info and weekly stats."""
-    chat_id = update.effective_chat.id
-    session = load_session(chat_id)
-    config  = load_config()
+    chat_id  = update.effective_chat.id
+    session  = load_session(chat_id)
+    config   = load_config()
 
     last_market = session.get("last_market", "—")
     last_run    = session.get("last_run", "—")
     run_count   = session.get("run_count", 0)
 
-    # Quick trade stats from today's file
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today      = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     today_file = TRADES_DIR / f"{today}.json"
     total_today = wins_today = 0
     if today_file.exists():
@@ -230,53 +320,91 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except Exception:
             pass
 
-    open_markets = get_open_markets(config)
-    open_str = ", ".join(open_markets) if open_markets else "None"
+    open_str = ", ".join(get_open_markets(config)) or "None"
+    wr_str   = f"{wins_today/total_today*100:.0f}%" if total_today else "—"
 
     await update.message.reply_text(
         f"📊 <b>Bot Status</b>\n\n"
-        f"Last scan: <b>{last_market}</b> @ {last_run}\n"
+        f"Last scan: <b>{last_market}</b>\n"
+        f"Last run:  {last_run}\n"
         f"Total scans: {run_count}\n\n"
-        f"<b>Today's trades:</b> {total_today} sent | {wins_today} winners\n"
-        f"Win rate: {wins_today/total_today*100:.0f}%" if total_today else
-        f"📊 <b>Bot Status</b>\n\nLast scan: <b>{last_market}</b> @ {last_run}\n"
-        f"Total scans: {run_count}\n\nNo trades sent today.\n"
+        f"<b>Today's signals:</b> {total_today} sent | {wins_today} winners | WR: {wr_str}\n\n"
         f"Open markets: {open_str}",
         parse_mode="HTML",
     )
 
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler: /stop — toggle pause."""
     chat_id = update.effective_chat.id
-    currently_paused = is_paused(chat_id)
-    set_paused(chat_id, not currently_paused)
-    if currently_paused:
+    paused  = is_paused(chat_id)
+    set_paused(chat_id, not paused)
+    if paused:
         await update.message.reply_text("▶️ Resumed. Send /trade &lt;MARKET&gt; to scan.", parse_mode="HTML")
     else:
         await update.message.reply_text("⏸ Paused. Send /stop again to resume.")
 
 
+# ── Callback query (button presses) ───────────────────────────────────────────
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler: inline keyboard button presses."""
     query   = update.callback_query
     chat_id = update.effective_chat.id
     data    = query.data or ""
 
     await query.answer()
 
+    # ── Market scan / rescan ──────────────────────────────────────────────────
     if data.startswith("trade:") or data.startswith("rescan:"):
-        market = data.split(":", 1)[1]
-        # Simulate /trade command
+        market       = data.split(":", 1)[1]
         context.args = [market]
         await trade_command(update, context)
+        return
 
-    elif data == "markets":
+    # ── Symbol selected → send full signal ───────────────────────────────────
+    if data.startswith("signal:"):
+        _, market, sym = data.split(":", 2)
+        key    = _SCAN_KEY.format(chat_id=chat_id)
+        result = context.application.bot_data.get(key)
+
+        if not result:
+            await query.message.reply_text(
+                "⚠️ Scan data expired. Please re-scan with /trade " + market
+            )
+            return
+
+        sym_data = result.get("symbols", {}).get(sym)
+        if not sym_data:
+            await query.message.reply_text(f"⚠️ No data for {sym}. Try re-scanning.")
+            return
+
+        # Send the full signal via Bot 6 (on-demand, targeted to this chat)
+        from bots.bot6_notification import send_signal_for_symbol
+        config = load_config()
+        run_id = result.get("run_id", "unknown")
+
+        msg = send_signal_for_symbol(
+            sym       = sym,
+            sym_data  = sym_data,
+            config    = config,
+            run_id    = run_id,
+            target_chat_id = str(chat_id),
+        )
+
+        # Show follow-up controls
+        await query.message.reply_text(
+            msg or f"Signal for {sym} sent above ☝️",
+            parse_mode="HTML",
+            reply_markup=_after_signal_keyboard(market),
+        )
+        return
+
+    # ── Other buttons ─────────────────────────────────────────────────────────
+    if data == "markets":
         await markets_command(update, context)
 
     elif data == "weekly_stats":
-        from weekly_review import get_weekly_summary
         try:
+            from weekly_review import get_weekly_summary
             summary = get_weekly_summary()
             await query.message.reply_text(summary, parse_mode="HTML")
         except Exception as e:
@@ -287,6 +415,5 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 def _session_label() -> str:
-    """UTC session label for display."""
     from utils.market_hours import get_session_label
     return get_session_label()
