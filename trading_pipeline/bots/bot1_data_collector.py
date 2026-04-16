@@ -40,24 +40,27 @@ CCXT_SYMBOL_MAP = {
 
 # ── Yahoo Finance session cache (one session shared across all calls) ──────────
 
-_YF_LOCK        = threading.Lock()
-_YF_SESSION     = None
-_YF_CRUMB       = None
-_YF_SESSION_TS  = 0.0
-_YF_SESSION_TTL = 3600   # Refresh every hour
+_YF_LOCK         = threading.Lock()
+_YF_REQ_SEM      = threading.Semaphore(1)   # One Yahoo Finance request at a time
+_YF_LAST_REQ_TS  = 0.0
+_YF_MIN_INTERVAL = 0.4                       # Seconds between requests
+_YF_SESSION      = None
+_YF_CRUMB: str | None = None                 # None = never fetched; "" = fetched but empty
+_YF_SESSION_TS   = 0.0
+_YF_SESSION_TTL  = 3600                      # Refresh session every hour
 
 
 def _get_yf_session():
     """
     Return a cached (session, crumb) pair for Yahoo Finance.
-    Refreshes automatically every _YF_SESSION_TTL seconds.
-    The session visits Yahoo Finance first to obtain consent cookies,
-    then fetches the crumb token required for v8 API calls.
+    Uses `_YF_CRUMB is not None` so an empty crumb string is still cached
+    (prevents all parallel threads from each triggering a refresh).
     """
     global _YF_SESSION, _YF_CRUMB, _YF_SESSION_TS
 
     with _YF_LOCK:
-        if _YF_SESSION and _YF_CRUMB and (time.time() - _YF_SESSION_TS) < _YF_SESSION_TTL:
+        if _YF_SESSION is not None and _YF_CRUMB is not None \
+                and (time.time() - _YF_SESSION_TS) < _YF_SESSION_TTL:
             return _YF_SESSION, _YF_CRUMB
 
         import requests
@@ -126,12 +129,21 @@ def _fetch_yfinance(symbol: str, timeframes: list[str], min_bars: int) -> dict:
             params["crumb"] = crumb
 
         try:
-            resp = session.get(
-                f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
-                params=params,
-                timeout=15,
-            )
+            # Serialise all Yahoo Finance requests + enforce minimum interval
+            with _YF_REQ_SEM:
+                global _YF_LAST_REQ_TS
+                elapsed = time.time() - _YF_LAST_REQ_TS
+                if elapsed < _YF_MIN_INTERVAL:
+                    time.sleep(_YF_MIN_INTERVAL - elapsed)
 
+                resp = session.get(
+                    f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
+                    params=params,
+                    timeout=15,
+                )
+                _YF_LAST_REQ_TS = time.time()
+
+            # Process response outside the semaphore
             if resp.status_code != 200:
                 logger.warning(f"{symbol} {tf}: HTTP {resp.status_code} from Yahoo")
                 tf_data[tf] = None
