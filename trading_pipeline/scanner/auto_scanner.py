@@ -1,19 +1,23 @@
 """
 scanner/auto_scanner.py — Background Auto-Scanner
 
-Runs on a configurable interval, checks which markets are currently open,
-runs the full pipeline (Bots 1-5) for each open market, and sends TRADE/WATCH
-signals directly to Telegram — no user interaction needed.
+Runs on a configurable interval, checks which markets are open,
+runs Bots 1-5 for each open market, and sends qualifying signals directly.
 
-Deduplication: tracks recently sent signals so the same setup is not
-re-alerted within the dedup_window_minutes (default 60 min).
+Deduplication rules (smart — avoids missing quality trades):
+  Key: symbol + direction only (simple and stable)
+  Block only if: same key sent within dedup_window AND no meaningful upgrade.
 
-Controlled via /autoscan command:
-  /autoscan         → show status
-  /autoscan on      → enable
-  /autoscan off     → disable
-  /autoscan 5m      → set interval to 5 minutes
-  /autoscan 15m     → set interval to 15 minutes
+  Always send (bypass dedup) when:
+    1. WATCH → TRADE escalation        (setup became actionable)
+    2. Grade upgrade  (B→A, A→A+)      (higher-quality setup now)
+    3. Confidence jump ≥ 15 pts        (meaningfully stronger confluence)
+    4. Dedup window has expired        (fresh signal period)
+
+WATCH follow-up:
+  When a WATCH signal is detected, a one-shot rescan fires for that
+  specific symbol after `watch_followup_minutes` (default 5).
+  This catches WATCH → TRADE upgrades without waiting for the next full cycle.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.date import DateTrigger
 
 from utils.config_loader import load_config, save_config
 from utils.logger import get_logger
@@ -33,10 +38,11 @@ from utils.market_hours import is_market_open, get_open_markets
 
 logger = get_logger("auto_scanner")
 
-DATA_DIR    = Path(__file__).parent.parent / "data"
-DEDUP_FILE  = DATA_DIR / "sent_signals.json"
+DATA_DIR   = Path(__file__).parent.parent / "data"
+DEDUP_FILE = DATA_DIR / "sent_signals.json"
 
-# Single shared scheduler instance (managed by main.py)
+GRADE_ORDER = {"C": 0, "B": 1, "A": 2, "A+": 3}
+
 _scheduler: BackgroundScheduler | None = None
 JOB_ID = "auto_scan"
 
@@ -44,11 +50,14 @@ JOB_ID = "auto_scan"
 # ── Deduplication ──────────────────────────────────────────────────────────────
 
 def _dedup_key(sym: str, sym_data: dict) -> str:
-    """Unique key for a specific setup on a symbol."""
-    direction  = sym_data.get("setup", {}).get("direction", "?")
-    setup_type = sym_data.get("setup", {}).get("setup_type", "?")
-    grade      = sym_data.get("decision", {}).get("grade", "?")
-    return f"{sym}_{direction}_{setup_type}_{grade}"
+    """
+    Stable dedup key: symbol + direction only.
+    Intentionally excludes setup_type and grade so that:
+      - The key stays consistent as confluence builds up
+      - Smart bypass rules decide whether to actually send
+    """
+    direction = sym_data.get("setup", {}).get("direction", "UNKNOWN")
+    return f"{sym}_{direction}"
 
 
 def _load_dedup() -> dict:
@@ -67,43 +76,79 @@ def _save_dedup(store: dict) -> None:
         json.dump(store, f, indent=2)
 
 
-def _is_duplicate(sym: str, sym_data: dict, window_minutes: int) -> bool:
-    """Return True if this exact setup was already sent within the dedup window."""
-    key   = _dedup_key(sym, sym_data)
-    store = _load_dedup()
+def _prune_dedup(store: dict, max_age_hours: int = 24) -> dict:
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+    return {
+        k: v for k, v in store.items()
+        if datetime.fromisoformat(v["sent_at"]) > cutoff
+    }
+
+
+def _should_send(sym: str, sym_data: dict, window_minutes: int) -> tuple[bool, str]:
+    """
+    Decide whether to send this signal, applying smart bypass rules.
+    Returns (should_send: bool, reason: str).
+    """
+    key      = _dedup_key(sym, sym_data)
+    store    = _load_dedup()
+    decision = sym_data.get("decision", {})
+
+    new_action = decision.get("action", "NO_TRADE")
+    new_conf   = decision.get("confidence_score", 0.0)
+    new_grade  = decision.get("grade", "C")
+
+    # Never seen before
     if key not in store:
-        return False
-    sent_at  = datetime.fromisoformat(store[key])
-    cutoff   = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
-    return sent_at > cutoff
+        return True, "first_signal"
+
+    entry     = store[key]
+    sent_at   = datetime.fromisoformat(entry["sent_at"])
+    old_action = entry.get("action", "NO_TRADE")
+    old_conf   = entry.get("confidence", 0.0)
+    old_grade  = entry.get("grade", "C")
+
+    # Window expired → fresh slate
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
+    if sent_at < cutoff:
+        return True, "window_expired"
+
+    # ── Smart bypass rules (within the dedup window) ──────────────────────────
+
+    # Rule 1: WATCH → TRADE escalation (the setup became actionable)
+    if old_action == "WATCH" and new_action == "TRADE":
+        return True, "watch_to_trade_escalation"
+
+    # Rule 2: Grade upgrade (quality improved)
+    if GRADE_ORDER.get(new_grade, 0) > GRADE_ORDER.get(old_grade, 0):
+        return True, f"grade_upgrade_{old_grade}_to_{new_grade}"
+
+    # Rule 3: Confidence jump ≥ 15 points (meaningfully stronger confluence)
+    if new_conf - old_conf >= 15.0:
+        return True, f"confidence_jump_{old_conf:.0f}_to_{new_conf:.0f}"
+
+    # Duplicate — block
+    return False, f"duplicate_within_{window_minutes}min"
 
 
 def _mark_sent(sym: str, sym_data: dict) -> None:
-    """Record that this setup was just sent."""
-    key   = _dedup_key(sym, sym_data)
-    store = _load_dedup()
-
-    # Prune entries older than 24 hours to keep the file small
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-    store  = {
-        k: v for k, v in store.items()
-        if datetime.fromisoformat(v) > cutoff
+    """Record that this signal was sent."""
+    key      = _dedup_key(sym, sym_data)
+    decision = sym_data.get("decision", {})
+    store    = _prune_dedup(_load_dedup())
+    store[key] = {
+        "sent_at":   datetime.now(timezone.utc).isoformat(),
+        "action":    decision.get("action", "NO_TRADE"),
+        "grade":     decision.get("grade", "C"),
+        "confidence": decision.get("confidence_score", 0.0),
+        "setup_type": sym_data.get("setup", {}).get("setup_type", ""),
     }
-    store[key] = datetime.now(timezone.utc).isoformat()
     _save_dedup(store)
 
 
-def _clear_dedup_for_symbol(sym: str) -> None:
-    """Remove all dedup entries for a symbol (force re-alert next scan)."""
-    store = _load_dedup()
-    store = {k: v for k, v in store.items() if not k.startswith(sym + "_")}
-    _save_dedup(store)
-
-
-# ── Pipeline runner ────────────────────────────────────────────────────────────
+# ── Pipeline runners ───────────────────────────────────────────────────────────
 
 def _run_pipeline_for_market(market: str) -> dict:
-    """Run Bots 1-5 for a single market. Returns enriched pipeline dict."""
+    """Run Bots 1-5 for an entire market. Returns pipeline dict."""
     from bots.bot1_data_collector import DataCollectorBot
     from bots.bot2_context        import ContextBot
     from bots.bot3_setup          import SetupBot
@@ -124,76 +169,225 @@ def _run_pipeline_for_market(market: str) -> dict:
     return pipeline
 
 
-# ── Auto-scan job ──────────────────────────────────────────────────────────────
+def _run_pipeline_for_symbol(sym: str, market: str) -> dict | None:
+    """
+    Run Bots 1-5 for a SINGLE symbol only.
+    Used for WATCH follow-up scans — avoids re-fetching the whole market.
+    Returns a mini pipeline dict with just this symbol, or None on failure.
+    """
+    from bots.bot1_data_collector import DataCollectorBot
+    from bots.bot2_context        import ContextBot
+    from bots.bot3_setup          import SetupBot
+    from bots.bot4_trigger        import TriggerBot
+    from bots.bot5_decision       import DecisionBot
+
+    config   = load_config()
+    run_id   = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + f"_fu_{sym}"
+
+    # Temporarily override symbols in the pipeline dict
+    pipeline = {
+        "run_id":          run_id,
+        "timestamp":       datetime.now(timezone.utc).isoformat(),
+        "selected_market": market,
+        "_single_symbol":  sym,   # flag for DataCollectorBot to fetch only this
+    }
+
+    try:
+        # We monkey-patch the config temporarily so Bot 1 fetches only `sym`
+        original_syms = config.get("symbols", {}).get(market, [])
+        config["symbols"] = dict(config.get("symbols", {}))
+        config["symbols"][market] = [sym]
+
+        from utils.config_loader import _CONFIG
+        import utils.config_loader as cl
+        old_config = cl._CONFIG.copy()
+        cl._CONFIG = config
+
+        pipeline = DataCollectorBot().run(pipeline)
+        pipeline = ContextBot().run(pipeline)
+        pipeline = SetupBot().run(pipeline)
+        pipeline = TriggerBot().run(pipeline)
+        pipeline = DecisionBot().run(pipeline)
+
+        cl._CONFIG = old_config  # Restore
+        return pipeline
+    except Exception as e:
+        logger.error(f"Follow-up pipeline error for {sym}: {e}")
+        return None
+
+
+# ── Signal processing ──────────────────────────────────────────────────────────
+
+def _process_symbol(
+    sym: str,
+    sym_data: dict,
+    run_id: str,
+    config: dict,
+    min_conf: float,
+    dedup_window: int,
+    send_watches: bool,
+    followup_minutes: int,
+) -> int:
+    """
+    Evaluate and send signal for one symbol. Returns 1 if sent, 0 otherwise.
+    Also schedules a follow-up scan if action is WATCH.
+    """
+    from bots.bot6_notification import send_signal_for_symbol
+
+    if sym_data.get("fetch_status") != "ok":
+        return 0
+
+    decision = sym_data.get("decision", {})
+    action   = decision.get("action", "NO_TRADE")
+    conf     = decision.get("confidence_score", 0.0)
+    market   = sym_data.get("market", "")
+
+    # Qualify: must meet minimum confidence
+    qualifies = (action == "TRADE" and conf >= min_conf) or \
+                (action == "WATCH" and send_watches and conf >= min_conf * 0.80)
+
+    if not qualifies:
+        logger.debug(f"  {sym}: {action} {conf:.0f}% — below threshold, skipping")
+        return 0
+
+    # Smart dedup check
+    send, reason = _should_send(sym, sym_data, dedup_window)
+
+    if not send:
+        logger.info(f"  {sym}: {action} {conf:.0f}% — suppressed ({reason})")
+        # Even if suppressed as TRADE, still schedule a follow-up for WATCHes
+        # that were previously sent — they may have upgraded since
+        return 0
+
+    # Send the signal
+    logger.info(f"  {sym}: SENDING {action} {conf:.0f}% [{decision.get('grade')}] — {reason}")
+    send_signal_for_symbol(
+        sym            = sym,
+        sym_data       = sym_data,
+        config         = config,
+        run_id         = run_id,
+        target_chat_id = None,  # Default TELEGRAM_CHAT_ID
+    )
+    _mark_sent(sym, sym_data)
+
+    # Schedule follow-up if this was a WATCH (to catch upgrade to TRADE quickly)
+    if action == "WATCH":
+        _schedule_followup(sym, market, followup_minutes)
+        logger.info(f"  {sym}: WATCH detected — follow-up scan in {followup_minutes}min")
+
+    return 1
+
+
+def _schedule_followup(sym: str, market: str, followup_minutes: int) -> None:
+    """
+    Schedule a one-shot follow-up scan for a single symbol.
+    Fires after `followup_minutes` to catch WATCH → TRADE upgrade.
+    Replaces any existing follow-up for this symbol (no stacking).
+    """
+    sched    = get_scheduler()
+    job_id   = f"followup_{sym}"
+    run_time = datetime.now(timezone.utc) + timedelta(minutes=followup_minutes)
+
+    if sched.get_job(job_id):
+        sched.remove_job(job_id)
+
+    sched.add_job(
+        _followup_job,
+        trigger  = DateTrigger(run_date=run_time),
+        args     = [sym, market],
+        id       = job_id,
+        name     = f"Follow-up: {sym}",
+        replace_existing = True,
+    )
+    logger.info(f"Follow-up scheduled: {sym} @ {run_time.strftime('%H:%M:%S UTC')}")
+
+
+def _followup_job(sym: str, market: str) -> None:
+    """
+    One-shot follow-up scan for a single symbol.
+    Runs the full pipeline for just this symbol and sends if upgraded.
+    """
+    logger.info(f"Follow-up scan: {sym} ({market})")
+    config = load_config()
+    auto   = config.get("auto_scan", {})
+
+    if not auto.get("enabled", False):
+        return
+
+    pipeline = _run_pipeline_for_symbol(sym, market)
+    if not pipeline:
+        return
+
+    sym_data = pipeline.get("symbols", {}).get(sym)
+    if not sym_data:
+        return
+
+    decision = sym_data.get("decision", {})
+    action   = decision.get("action", "NO_TRADE")
+    conf     = decision.get("confidence_score", 0.0)
+
+    logger.info(f"  Follow-up result: {sym} → {action} {conf:.0f}%")
+
+    _process_symbol(
+        sym              = sym,
+        sym_data         = sym_data,
+        run_id           = pipeline.get("run_id", "followup"),
+        config           = config,
+        min_conf         = auto.get("min_confidence_auto", 70),
+        dedup_window     = auto.get("dedup_window_minutes", 60),
+        send_watches     = auto.get("send_watches", False),
+        followup_minutes = auto.get("watch_followup_minutes", 5),
+    )
+
+
+# ── Main auto-scan job ─────────────────────────────────────────────────────────
 
 def run_auto_scan() -> None:
     """
-    The scheduled job — called every N minutes by APScheduler.
-    Scans all open markets, sends qualifying signals directly.
+    Scheduled job — runs every N minutes.
+    Scans all open markets and sends qualifying signals.
     """
     config = load_config()
     auto   = config.get("auto_scan", {})
 
     if not auto.get("enabled", False):
-        return  # Auto-scan disabled — do nothing
-
-    min_conf       = auto.get("min_confidence_auto", config.get("scoring", {}).get("min_confidence", 70))
-    dedup_window   = auto.get("dedup_window_minutes", 60)
-    send_watches   = auto.get("send_watches", False)
-
-    open_markets = get_open_markets(config)
-    scanned_markets = auto.get("markets", config.get("markets", []))
-    targets = [m for m in scanned_markets if m in open_markets]
-
-    if not targets:
-        logger.debug("Auto-scan: no open markets right now")
         return
 
-    logger.info(f"Auto-scan started — open markets: {targets}")
+    min_conf         = auto.get("min_confidence_auto", 70)
+    dedup_window     = auto.get("dedup_window_minutes", 60)
+    send_watches     = auto.get("send_watches", False)
+    followup_minutes = auto.get("watch_followup_minutes", 5)
+
+    open_markets    = get_open_markets(config)
+    target_markets  = [m for m in auto.get("markets", config.get("markets", [])) if m in open_markets]
+
+    if not target_markets:
+        logger.debug("Auto-scan: no open markets")
+        return
+
+    logger.info(f"Auto-scan — open: {target_markets}")
     total_sent = 0
 
-    for market in targets:
+    for market in target_markets:
         try:
             pipeline = _run_pipeline_for_market(market)
             run_id   = pipeline.get("run_id", "unknown")
 
-            from bots.bot6_notification import send_signal_for_symbol
-
             for sym, sym_data in pipeline.get("symbols", {}).items():
-                if sym_data.get("fetch_status") != "ok":
-                    continue
-
-                decision = sym_data.get("decision", {})
-                action   = decision.get("action", "NO_TRADE")
-                conf     = decision.get("confidence_score", 0)
-
-                should_send = (
-                    (action == "TRADE" and conf >= min_conf) or
-                    (action == "WATCH" and send_watches)
+                total_sent += _process_symbol(
+                    sym              = sym,
+                    sym_data         = sym_data,
+                    run_id           = run_id,
+                    config           = config,
+                    min_conf         = min_conf,
+                    dedup_window     = dedup_window,
+                    send_watches     = send_watches,
+                    followup_minutes = followup_minutes,
                 )
-
-                if not should_send:
-                    continue
-
-                if _is_duplicate(sym, sym_data, dedup_window):
-                    logger.info(f"  {sym}: skip (duplicate within {dedup_window}min)")
-                    continue
-
-                # Send directly — no user tap needed
-                send_signal_for_symbol(
-                    sym            = sym,
-                    sym_data       = sym_data,
-                    config         = config,
-                    run_id         = run_id,
-                    target_chat_id = None,  # uses TELEGRAM_CHAT_ID env var
-                )
-                _mark_sent(sym, sym_data)
-                total_sent += 1
-
         except Exception as e:
             logger.error(f"Auto-scan error for {market}: {e}")
 
-    logger.info(f"Auto-scan complete — {total_sent} signal(s) sent across {len(targets)} markets")
+    logger.info(f"Auto-scan complete — {total_sent} signal(s) sent")
 
 
 # ── Scheduler management ───────────────────────────────────────────────────────
@@ -206,30 +400,29 @@ def get_scheduler() -> BackgroundScheduler:
 
 
 def start_auto_scanner(interval_minutes: int) -> None:
-    """Start or restart the auto-scan job at the given interval."""
+    """Start or reschedule the auto-scan job."""
     sched = get_scheduler()
 
     if not sched.running:
         sched.start()
-        logger.info("APScheduler started for auto-scan")
+        logger.info("APScheduler started")
 
-    # Remove existing job if present
     if sched.get_job(JOB_ID):
         sched.remove_job(JOB_ID)
 
     sched.add_job(
         run_auto_scan,
-        trigger  = IntervalTrigger(minutes=interval_minutes),
-        id       = JOB_ID,
-        name     = f"Auto-scan every {interval_minutes}m",
+        trigger          = IntervalTrigger(minutes=interval_minutes),
+        id               = JOB_ID,
+        name             = f"Auto-scan every {interval_minutes}m",
         replace_existing = True,
-        next_run_time = datetime.now(timezone.utc),  # Run immediately on start
+        next_run_time    = datetime.now(timezone.utc),  # Run immediately on start
     )
     logger.info(f"Auto-scan scheduled: every {interval_minutes} minutes")
 
 
 def stop_auto_scanner() -> None:
-    """Pause the auto-scan job (scheduler stays alive for weekly review)."""
+    """Remove the periodic auto-scan job (scheduler stays alive)."""
     sched = get_scheduler()
     if sched.get_job(JOB_ID):
         sched.remove_job(JOB_ID)
@@ -237,27 +430,41 @@ def stop_auto_scanner() -> None:
 
 
 def update_interval(interval_minutes: int, config: dict) -> dict:
-    """Change the scan interval: update config + reschedule the job."""
+    """Change interval, persist to config, reschedule."""
     auto = config.get("auto_scan", {})
     auto["interval_minutes"] = interval_minutes
     config["auto_scan"] = auto
     save_config(config)
-
     if auto.get("enabled", False):
         start_auto_scanner(interval_minutes)
     return config
 
 
-def get_status() -> dict:
-    """Return current auto-scanner status for /autoscan command."""
-    config  = load_config()
-    auto    = config.get("auto_scan", {})
-    sched   = get_scheduler()
-    job     = sched.get_job(JOB_ID) if sched.running else None
+def set_enabled(enabled: bool) -> None:
+    """Enable or disable auto-scan, persist to config."""
+    config = load_config()
+    auto   = config.get("auto_scan", {})
+    auto["enabled"] = enabled
+    config["auto_scan"] = auto
+    save_config(config)
+    if enabled:
+        start_auto_scanner(auto.get("interval_minutes", 15))
+    else:
+        stop_auto_scanner()
 
-    next_run = None
-    if job and job.next_run_time:
-        next_run = job.next_run_time.strftime("%H:%M:%S UTC")
+
+def get_status() -> dict:
+    """Return current status dict for /autoscan command."""
+    config = load_config()
+    auto   = config.get("auto_scan", {})
+    sched  = get_scheduler()
+    job    = sched.get_job(JOB_ID) if sched.running else None
+
+    # Count active follow-up jobs
+    followup_count = sum(
+        1 for j in (sched.get_jobs() if sched.running else [])
+        if j.id.startswith("followup_")
+    )
 
     return {
         "enabled":          auto.get("enabled", False),
@@ -266,20 +473,8 @@ def get_status() -> dict:
         "min_confidence":   auto.get("min_confidence_auto", 70),
         "dedup_window":     auto.get("dedup_window_minutes", 60),
         "send_watches":     auto.get("send_watches", False),
-        "next_run":         next_run,
+        "followup_minutes": auto.get("watch_followup_minutes", 5),
+        "next_run":         job.next_run_time.strftime("%H:%M:%S UTC") if (job and job.next_run_time) else "—",
+        "active_followups": followup_count,
         "scheduler_alive":  sched.running if sched else False,
     }
-
-
-def set_enabled(enabled: bool) -> None:
-    """Enable or disable auto-scan and persist to config."""
-    config = load_config()
-    auto   = config.get("auto_scan", {})
-    auto["enabled"] = enabled
-    config["auto_scan"] = auto
-    save_config(config)
-
-    if enabled:
-        start_auto_scanner(auto.get("interval_minutes", 15))
-    else:
-        stop_auto_scanner()

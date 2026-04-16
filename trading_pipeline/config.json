@@ -33,7 +33,8 @@
     "markets": ["NIFTY", "FOREX", "CRYPTO", "GOLD"],
     "min_confidence_auto": 70,
     "dedup_window_minutes": 60,
-    "send_watches": false
+    "send_watches": false,
+    "watch_followup_minutes": 5
   },
   "min_bars_required": 30,
   "volume_spike_multiplier": 1.5,
