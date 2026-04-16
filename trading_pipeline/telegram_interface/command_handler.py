@@ -21,7 +21,7 @@ from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from utils.config_loader import load_config
+from utils.config_loader import load_config, save_config
 from utils.logger import get_logger
 from utils.market_hours import is_market_open, get_closed_markets_message, get_open_markets
 from telegram_interface.session_store import (
@@ -198,11 +198,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "2️⃣ Bot scans all symbols, ranks setups by confidence\n"
         "3️⃣ Tap any symbol to get the full trade signal\n\n"
         "<b>Commands:</b>\n"
-        "/trade &lt;MARKET&gt; — Scan (NIFTY · FOREX · CRYPTO · GOLD · ALL)\n"
-        "/markets — Market open/closed status\n"
-        "/status  — Today's performance\n"
-        "/stop    — Pause/resume\n\n"
-        "👇 Pick a market:",
+        "/trade &lt;MARKET&gt; — Manual scan (NIFTY · FOREX · CRYPTO · GOLD · ALL)\n"
+        "/autoscan       — Auto-scan settings (enable/disable/interval)\n"
+        "/markets        — Market open/closed status\n"
+        "/status         — Today's performance\n"
+        "/stop           — Pause/resume\n\n"
+        "💡 <b>Tip:</b> Use /autoscan on to get signals automatically!\n\n"
+        "👇 Pick a market for a manual scan:",
         parse_mode="HTML",
         reply_markup=keyboard,
     )
@@ -398,6 +400,50 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
+    # ── Auto-scan controls ────────────────────────────────────────────────────
+    if data.startswith("autoscan:"):
+        from scanner.auto_scanner import (
+            get_status, set_enabled, update_interval, run_auto_scan,
+        )
+        sub = data[len("autoscan:"):]
+
+        if sub == "toggle":
+            status = get_status()
+            new_state = not status["enabled"]
+            set_enabled(new_state)
+            label = "ENABLED ✅" if new_state else "DISABLED ⏸"
+            await query.message.reply_text(
+                f"Auto-scan {label}\nUse /autoscan to manage settings.",
+                parse_mode="HTML",
+            )
+
+        elif sub == "now":
+            await query.message.reply_text("⏳ Running auto-scan now...")
+            config = load_config()
+            loop   = asyncio.get_event_loop()
+            await loop.run_in_executor(None, run_auto_scan)
+            await query.message.reply_text("✅ Auto-scan complete — check for signals above.")
+
+        elif sub.startswith("interval:"):
+            minutes = int(sub.split(":")[1])
+            config  = load_config()
+            update_interval(minutes, config)
+            await query.message.reply_text(
+                f"⏱ Interval set to <b>{minutes} minutes</b>.", parse_mode="HTML"
+            )
+
+        elif sub == "watches":
+            config = load_config()
+            auto   = config.get("auto_scan", {})
+            auto["send_watches"] = not auto.get("send_watches", False)
+            config["auto_scan"]  = auto
+            save_config(config)
+            state = "ON" if auto["send_watches"] else "OFF"
+            await query.message.reply_text(
+                f"👀 WATCH alerts: <b>{state}</b>", parse_mode="HTML"
+            )
+        return
+
     # ── Other buttons ─────────────────────────────────────────────────────────
     if data == "markets":
         await markets_command(update, context)
@@ -412,6 +458,117 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     elif data == "stop":
         await stop_command(update, context)
+
+
+async def autoscan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /autoscan              — show current status
+    /autoscan on           — enable auto-scan
+    /autoscan off          — disable auto-scan
+    /autoscan 5m / 15m / 30m — change interval
+    /autoscan watches on/off  — toggle WATCH alerts
+    """
+    from scanner.auto_scanner import get_status, set_enabled, update_interval
+
+    args    = [a.lower() for a in (context.args or [])]
+    config  = load_config()
+
+    # Handle sub-commands
+    if args:
+        arg = args[0]
+
+        if arg == "on":
+            set_enabled(True)
+            interval = config.get("auto_scan", {}).get("interval_minutes", 15)
+            await update.message.reply_text(
+                f"✅ <b>Auto-scan ENABLED</b>\n"
+                f"Scanning every <b>{interval} min</b> — signals sent automatically.\n\n"
+                f"Use /autoscan off to disable.",
+                parse_mode="HTML",
+            )
+            return
+
+        if arg == "off":
+            set_enabled(False)
+            await update.message.reply_text(
+                "⏸ <b>Auto-scan DISABLED</b>\nUse /autoscan on to re-enable.",
+                parse_mode="HTML",
+            )
+            return
+
+        # Interval: 5m / 15m / 30m / 60m
+        if arg.endswith("m") and arg[:-1].isdigit():
+            minutes = int(arg[:-1])
+            if not 1 <= minutes <= 1440:
+                await update.message.reply_text("❌ Interval must be between 1m and 1440m.")
+                return
+            config = update_interval(minutes, config)
+            await update.message.reply_text(
+                f"⏱ <b>Interval updated to {minutes} minutes</b>\n"
+                f"Auto-scan: {'ENABLED' if config.get('auto_scan',{}).get('enabled') else 'DISABLED'}",
+                parse_mode="HTML",
+            )
+            return
+
+        # Toggle watch alerts
+        if arg == "watches":
+            sub = args[1] if len(args) > 1 else ""
+            auto = config.get("auto_scan", {})
+            if sub == "on":
+                auto["send_watches"] = True
+            elif sub == "off":
+                auto["send_watches"] = False
+            else:
+                auto["send_watches"] = not auto.get("send_watches", False)
+            config["auto_scan"] = auto
+            save_config(config)
+            state = "ON" if auto["send_watches"] else "OFF"
+            await update.message.reply_text(f"👀 WATCH alerts: <b>{state}</b>", parse_mode="HTML")
+            return
+
+    # Show status
+    status = get_status()
+    enabled_str  = "✅ ENABLED" if status["enabled"] else "⏸ DISABLED"
+    next_str     = status["next_run"] or "—"
+    watches_str  = "ON" if status["send_watches"] else "OFF"
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "⏹ Disable" if status["enabled"] else "▶️ Enable",
+                callback_data="autoscan:toggle",
+            ),
+            InlineKeyboardButton("🔄 Scan Now", callback_data="autoscan:now"),
+        ],
+        [
+            InlineKeyboardButton("5m",  callback_data="autoscan:interval:5"),
+            InlineKeyboardButton("15m", callback_data="autoscan:interval:15"),
+            InlineKeyboardButton("30m", callback_data="autoscan:interval:30"),
+            InlineKeyboardButton("1h",  callback_data="autoscan:interval:60"),
+        ],
+        [
+            InlineKeyboardButton(
+                f"👀 WATCH alerts: {watches_str}",
+                callback_data="autoscan:watches",
+            ),
+        ],
+    ])
+
+    markets_str = ", ".join(status["markets"])
+    await update.message.reply_text(
+        f"🤖 <b>Auto-Scanner Status</b>\n\n"
+        f"State:     {enabled_str}\n"
+        f"Interval:  every {status['interval_minutes']} minutes\n"
+        f"Markets:   {markets_str}\n"
+        f"Min conf:  {status['min_confidence']}%\n"
+        f"Dedup win: {status['dedup_window']} min\n"
+        f"WATCH alerts: {watches_str}\n"
+        f"Next run:  {next_str}\n\n"
+        f"<b>Commands:</b>\n"
+        f"/autoscan on · off · 5m · 15m · 30m · 1h",
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
 
 
 def _session_label() -> str:

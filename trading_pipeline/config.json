@@ -27,6 +27,14 @@
   },
   "disabled_symbols": [],
   "pipeline_interval_minutes": 0,
+  "auto_scan": {
+    "enabled": false,
+    "interval_minutes": 15,
+    "markets": ["NIFTY", "FOREX", "CRYPTO", "GOLD"],
+    "min_confidence_auto": 70,
+    "dedup_window_minutes": 60,
+    "send_watches": false
+  },
   "min_bars_required": 30,
   "volume_spike_multiplier": 1.5,
   "displacement_ratio_threshold": 0.70,
