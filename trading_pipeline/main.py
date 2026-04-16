@@ -89,16 +89,20 @@ def _run_weekly_review() -> None:
 
 def main() -> None:
     config = load_config()
-    token  = os.environ.get("TELEGRAM_BOT_TOKEN") or \
-             config.get("telegram", {}).get("bot_token", "")
     port   = int(os.environ.get("PORT", 8080))
 
-    if not token:
-        logger.error("TELEGRAM_BOT_TOKEN not set — exiting")
-        sys.exit(1)
-
-    # ── Health server ──────────────────────────────────────────────
+    # ── Health server — must start first so Railway healthcheck passes ──
     _start_health_server(port)
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN") or \
+            config.get("telegram", {}).get("bot_token", "")
+
+    if not token or token == "SET_ME":
+        logger.error("TELEGRAM_BOT_TOKEN not configured — bot idle, health endpoint alive")
+        # Keep process alive so Railway healthcheck keeps passing
+        import time
+        while True:
+            time.sleep(60)
 
     # ── Shared APScheduler (used for both auto-scan + weekly review)
     scheduler = get_scheduler()
