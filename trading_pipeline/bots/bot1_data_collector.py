@@ -26,12 +26,29 @@ YF_TF_PARAMS = {
     "15m": {"period": "5d",  "interval": "15m"},
 }
 
-# ccxt uses same notation as config
+# OKX symbol format (ccxt standard)
 CCXT_SYMBOL_MAP = {
     "BTC-USD": "BTC/USDT",
     "ETH-USD": "ETH/USDT",
     "BNB-USD": "BNB/USDT",
+    "SOL-USD": "SOL/USDT",
 }
+
+
+def _yf_session():
+    """Requests session with browser headers to bypass Yahoo Finance IP blocks."""
+    import requests
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+    })
+    return s
 
 
 def _fetch_yfinance(symbol: str, timeframes: list[str], min_bars: int) -> dict:
@@ -41,13 +58,14 @@ def _fetch_yfinance(symbol: str, timeframes: list[str], min_bars: int) -> dict:
     except ImportError:
         return {"fetch_status": "error", "error": "yfinance not installed"}
 
+    session = _yf_session()
     tf_data = {}
     for tf in timeframes:
         params = YF_TF_PARAMS.get(tf)
         if not params:
             continue
         try:
-            ticker = yf.Ticker(symbol)
+            ticker = yf.Ticker(symbol, session=session)
             df = ticker.history(period=params["period"], interval=params["interval"])
             if df is None or len(df) < min_bars:
                 tf_data[tf] = None
@@ -84,7 +102,7 @@ def _fetch_yfinance(symbol: str, timeframes: list[str], min_bars: int) -> dict:
 
 
 def _fetch_ccxt(symbol: str, timeframes: list[str], min_bars: int) -> dict:
-    """Fetch OHLCV from Binance public API via ccxt (no API key required)."""
+    """Fetch OHLCV from OKX public API via ccxt (no API key, no geo-restriction)."""
     try:
         import ccxt
     except ImportError:
@@ -93,7 +111,7 @@ def _fetch_ccxt(symbol: str, timeframes: list[str], min_bars: int) -> dict:
     ccxt_symbol = CCXT_SYMBOL_MAP.get(symbol, symbol.replace("-", "/").replace("USD", "USDT"))
 
     try:
-        exchange = ccxt.binance({"enableRateLimit": True})
+        exchange = ccxt.okx({"enableRateLimit": True})
     except Exception as e:
         return {"fetch_status": "error", "error": str(e)}
 
@@ -115,7 +133,7 @@ def _fetch_ccxt(symbol: str, timeframes: list[str], min_bars: int) -> dict:
                 "timestamps": [str(datetime.utcfromtimestamp(c[0] / 1000)) for c in ohlcv],
                 "count":      len(ohlcv),
             }
-            time.sleep(0.3)  # Respect Binance rate limits
+            time.sleep(0.3)
         except Exception as e:
             logger.error(f"{symbol} {tf} ccxt error: {e}")
             tf_data[tf] = None
