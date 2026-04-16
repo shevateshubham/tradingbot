@@ -134,21 +134,24 @@ def _compute_pd_zones(highs: list, lows: list, current_price: float, lookback: i
     }
 
 
-def _analyze_symbol(symbol_data: dict, config: dict) -> dict:
+def _analyze_symbol(symbol_data: dict, config: dict, htf_tf: str = "15m") -> dict:
     """Compute context for a single symbol. Returns the 'context' sub-dict."""
-    tf_data = symbol_data.get("timeframes", {})
-    tf_15m  = tf_data.get("15m")
+    tf_data       = symbol_data.get("timeframes", {})
     current_price = symbol_data.get("current_price", 0.0)
 
-    if not tf_15m:
+    # Use trade_type HTF timeframe; fall back through available timeframes
+    tf_htf = (tf_data.get(htf_tf) or tf_data.get("1h") or
+              tf_data.get("15m") or tf_data.get("4h") or tf_data.get("1d"))
+
+    if not tf_htf:
         return {
             "htf_bias": "NEUTRAL", "bias_strength": 0,
-            "context_score": 0, "error": "no_15m_data",
+            "context_score": 0, "error": f"no_{htf_tf}_data",
         }
 
-    highs  = tf_15m["highs"]
-    lows   = tf_15m["lows"]
-    closes = tf_15m["closes"]
+    highs  = tf_htf["highs"]
+    lows   = tf_htf["lows"]
+    closes = tf_htf["closes"]
     n_side = config.get("fractal_side_bars", 3)
     lookback = config.get("swing_lookback_bars", 50)
 
@@ -209,12 +212,14 @@ class ContextBot:
         symbols = pipeline_dict.get("symbols", {})
         processed = 0
 
+        htf_tf = pipeline_dict.get("trade_type_config", {}).get("htf_tf", "15m")
+
         for sym, sym_data in symbols.items():
             if sym_data.get("fetch_status") != "ok":
                 sym_data["context"] = {"htf_bias": "NEUTRAL", "context_score": 0, "skipped": True}
                 continue
             try:
-                sym_data["context"] = _analyze_symbol(sym_data, config)
+                sym_data["context"] = _analyze_symbol(sym_data, config, htf_tf)
                 processed += 1
                 logger.info(
                     f"  {sym}: bias={sym_data['context']['htf_bias']} "

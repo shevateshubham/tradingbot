@@ -248,7 +248,8 @@ class DataCollectorBot:
     def run(self, pipeline_dict: dict) -> dict:
         config     = load_config()
         market     = pipeline_dict.get("selected_market", "ALL")
-        timeframes = config.get("timeframes", ["1m", "5m", "15m"])
+        tt_config  = pipeline_dict.get("trade_type_config", {})
+        timeframes = tt_config.get("timeframes") or config.get("timeframes", ["1m", "5m", "15m"])
         min_bars   = config.get("min_bars_required", 30)
 
         symbols_to_fetch: dict[str, str] = {}

@@ -69,10 +69,12 @@ def _decide_symbol(sym: str, sym_data: dict, config: dict) -> dict:
     setup_score   = setup.get("setup_score", 0)
     trigger_score = trigger.get("trigger_score", 0)
 
-    weights = config.get("scoring", {})
+    weights      = config.get("scoring", {})
     min_conf     = weights.get("min_confidence",  70)
     max_sl_pct   = weights.get("max_sl_percent",  2.0)
-    min_rr       = weights.get("min_rr_ratio",    2.0)
+    # Use trade_type min_rr if injected, else scoring default
+    tt_min_rr    = sym_data.get("_trade_type_min_rr")
+    min_rr       = tt_min_rr if tt_min_rr is not None else weights.get("min_rr_ratio", 2.0)
 
     # Inducement reversal bonus: engineered liquidity + aligned sweep = +5
     inducement_bonus = 0
@@ -144,9 +146,12 @@ class DecisionBot:
     def run(self, pipeline_dict: dict) -> dict:
         config  = load_config()
         symbols = pipeline_dict.get("symbols", {})
+        min_rr  = pipeline_dict.get("trade_type_config", {}).get("min_rr")
         trades = watches = no_trades = 0
 
         for sym, sym_data in symbols.items():
+            if min_rr is not None:
+                sym_data["_trade_type_min_rr"] = min_rr
             if sym_data.get("fetch_status") != "ok":
                 sym_data["decision"] = {"action": "NO_TRADE", "skipped": True}
                 continue

@@ -6,6 +6,44 @@
     "CRYPTO": ["BTC-USD", "ETH-USD"],
     "GOLD":   ["GC=F"]
   },
+  "trade_types": {
+    "scalp": {
+      "label":                  "⚡ Scalp",
+      "timeframes":             ["1m", "5m", "15m"],
+      "htf_tf":                 "15m",
+      "ltf_tf":                 "1m",
+      "min_rr":                 1.5,
+      "scan_interval_minutes":  3,
+      "description":            "1-15 min trades, tight SL, fast R:R 1.5"
+    },
+    "intraday": {
+      "label":                  "📈 Intraday",
+      "timeframes":             ["5m", "15m", "1h"],
+      "htf_tf":                 "1h",
+      "ltf_tf":                 "5m",
+      "min_rr":                 2.0,
+      "scan_interval_minutes":  15,
+      "description":            "Same-day trades, 5m entry, 1h context, R:R 2.0"
+    },
+    "short_term": {
+      "label":                  "📅 Short Term",
+      "timeframes":             ["1h", "4h", "1d"],
+      "htf_tf":                 "1d",
+      "ltf_tf":                 "1h",
+      "min_rr":                 2.5,
+      "scan_interval_minutes":  60,
+      "description":            "Days to weeks, 1h entry, daily context, R:R 2.5"
+    },
+    "long_term": {
+      "label":                  "📆 Long Term",
+      "timeframes":             ["4h", "1d"],
+      "htf_tf":                 "1d",
+      "ltf_tf":                 "4h",
+      "min_rr":                 3.0,
+      "scan_interval_minutes":  240,
+      "description":            "Weeks to months, 4h entry, daily context, R:R 3.0"
+    }
+  },
   "timeframes": ["1m", "5m", "15m"],
   "scoring": {
     "context_weight": 0.40,
@@ -16,10 +54,10 @@
     "max_sl_percent": 2.0
   },
   "session_times": {
-    "NIFTY":  { "open": "09:15", "close": "15:30", "timezone": "Asia/Kolkata", "days": [0,1,2,3,4] },
-    "FOREX":  { "open": "00:00", "close": "23:59", "timezone": "UTC",          "days": [0,1,2,3,4] },
-    "CRYPTO": { "open": "00:00", "close": "23:59", "timezone": "UTC",          "days": [0,1,2,3,4,5,6] },
-    "GOLD":   { "open": "18:00", "close": "17:00", "timezone": "America/New_York", "days": [0,1,2,3,4] }
+    "NIFTY":  { "open": "09:15", "close": "15:30", "timezone": "Asia/Kolkata",      "days": [0,1,2,3,4] },
+    "FOREX":  { "open": "00:00", "close": "23:59", "timezone": "UTC",               "days": [0,1,2,3,4] },
+    "CRYPTO": { "open": "00:00", "close": "23:59", "timezone": "UTC",               "days": [0,1,2,3,4,5,6] },
+    "GOLD":   { "open": "18:00", "close": "17:00", "timezone": "America/New_York",  "days": [0,1,2,3,4] }
   },
   "telegram": {
     "bot_token": "",
@@ -28,12 +66,14 @@
   "disabled_symbols": [],
   "pipeline_interval_minutes": 0,
   "auto_scan": {
-    "enabled": false,
-    "interval_minutes": 15,
-    "markets": ["NIFTY", "FOREX", "CRYPTO", "GOLD"],
-    "min_confidence_auto": 70,
-    "dedup_window_minutes": 60,
-    "send_watches": false,
+    "enabled":                false,
+    "market":                 "CRYPTO",
+    "trade_type":             "intraday",
+    "interval_minutes":       15,
+    "markets":                ["NIFTY", "FOREX", "CRYPTO", "GOLD"],
+    "min_confidence_auto":    70,
+    "dedup_window_minutes":   60,
+    "send_watches":           false,
     "watch_followup_minutes": 5
   },
   "min_bars_required": 30,

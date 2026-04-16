@@ -147,7 +147,15 @@ def _mark_sent(sym: str, sym_data: dict) -> None:
 
 # ── Pipeline runners ───────────────────────────────────────────────────────────
 
-def _run_pipeline_for_market(market: str) -> dict:
+def _get_trade_type_config(trade_type: str, config: dict) -> dict:
+    return config.get("trade_types", {}).get(trade_type, {
+        "timeframes": ["1m", "5m", "15m"],
+        "htf_tf": "15m", "ltf_tf": "1m",
+        "min_rr": 2.0, "scan_interval_minutes": 15,
+    })
+
+
+def _run_pipeline_for_market(market: str, trade_type: str | None = None) -> dict:
     """Run Bots 1-5 for an entire market. Returns pipeline dict."""
     from bots.bot1_data_collector import DataCollectorBot
     from bots.bot2_context        import ContextBot
@@ -155,11 +163,17 @@ def _run_pipeline_for_market(market: str) -> dict:
     from bots.bot4_trigger        import TriggerBot
     from bots.bot5_decision       import DecisionBot
 
-    run_id   = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    config    = load_config()
+    tt        = trade_type or config.get("auto_scan", {}).get("trade_type", "intraday")
+    tt_config = _get_trade_type_config(tt, config)
+    run_id    = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
     pipeline = {
-        "run_id":          run_id,
-        "timestamp":       datetime.now(timezone.utc).isoformat(),
-        "selected_market": market,
+        "run_id":            run_id,
+        "timestamp":         datetime.now(timezone.utc).isoformat(),
+        "selected_market":   market,
+        "trade_type":        tt,
+        "trade_type_config": tt_config,
     }
     pipeline = DataCollectorBot().run(pipeline)
     pipeline = ContextBot().run(pipeline)
@@ -358,19 +372,27 @@ def run_auto_scan() -> None:
     send_watches     = auto.get("send_watches", False)
     followup_minutes = auto.get("watch_followup_minutes", 5)
 
-    open_markets    = get_open_markets(config)
-    target_markets  = [m for m in auto.get("markets", config.get("markets", [])) if m in open_markets]
+    trade_type   = auto.get("trade_type", "intraday")
+    scan_market  = auto.get("market", "")   # single market preference if set
+
+    open_markets = get_open_markets(config)
+    if scan_market and scan_market != "ALL":
+        # User configured a specific market
+        target_markets = [scan_market] if (scan_market in open_markets or
+                          scan_market == "CRYPTO") else []
+    else:
+        target_markets = [m for m in auto.get("markets", config.get("markets", [])) if m in open_markets]
 
     if not target_markets:
         logger.debug("Auto-scan: no open markets")
         return
 
-    logger.info(f"Auto-scan — open: {target_markets}")
+    logger.info(f"Auto-scan — markets: {target_markets} | type: {trade_type}")
     total_sent = 0
 
     for market in target_markets:
         try:
-            pipeline = _run_pipeline_for_market(market)
+            pipeline = _run_pipeline_for_market(market, trade_type)
             run_id   = pipeline.get("run_id", "unknown")
 
             for sym, sym_data in pipeline.get("symbols", {}).items():

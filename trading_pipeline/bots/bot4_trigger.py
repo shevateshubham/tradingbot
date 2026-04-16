@@ -136,9 +136,15 @@ def _analyze_symbol(sym_data: dict, config: dict) -> dict:
     vol_multiplier    = config.get("volume_spike_multiplier", 1.5)
     disp_ratio_thresh = config.get("displacement_ratio_threshold", 0.70)
 
-    # Use 5m for BOS, 1m for displacement (more granular)
-    tf_5  = tf_data.get("5m") or tf_data.get("15m") or {}
-    tf_1  = tf_data.get("1m") or tf_5
+    # Use trade_type LTF for BOS; one step lower for displacement
+    ltf_tf   = sym_data.get("_ltf_tf", "5m")
+    tfs      = list(tf_data.keys())
+    # Pick one timeframe below ltf_tf for displacement candle if available
+    ltf_idx  = next((i for i, k in enumerate(["1m","5m","15m","1h","4h","1d"]) if k == ltf_tf), 1)
+    disp_tf  = ["1m","5m","15m","1h","4h","1d"][max(0, ltf_idx - 1)]
+
+    tf_5  = tf_data.get(ltf_tf) or tf_data.get("5m") or tf_data.get("15m") or {}
+    tf_1  = tf_data.get(disp_tf) or tf_5
 
     h5 = tf_5.get("highs", [])
     l5 = tf_5.get("lows", [])
@@ -197,9 +203,11 @@ class TriggerBot:
     def run(self, pipeline_dict: dict) -> dict:
         config  = load_config()
         symbols = pipeline_dict.get("symbols", {})
+        ltf_tf  = pipeline_dict.get("trade_type_config", {}).get("ltf_tf", "5m")
         processed = skipped = 0
 
         for sym, sym_data in symbols.items():
+            sym_data["_ltf_tf"] = ltf_tf  # inject for _analyze_symbol
             if sym_data.get("fetch_status") != "ok":
                 sym_data["trigger"] = {"trigger_score": 0, "skipped": True}
                 continue
