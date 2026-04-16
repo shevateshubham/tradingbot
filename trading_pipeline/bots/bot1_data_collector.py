@@ -3,19 +3,20 @@ Bot 1: Data Collector Bot
 Fetches OHLCV data ONLY for the selected market/segment.
 
 Data sources:
-  - NIFTY/FOREX/GOLD : Yahoo Finance v8 API (direct HTTP with cookie+crumb)
+  - NIFTY/FOREX/GOLD : Twelve Data API (free, 800 calls/day, no datacenter block)
+                       Set TWELVE_DATA_API_KEY env var (free at twelvedata.com)
   - CRYPTO           : OKX via ccxt (no API key, globally accessible)
 
-The direct Yahoo Finance approach bypasses yfinance's Ticker.history() which
-fails on cloud IPs due to Yahoo's consent cookie requirement.
+Yahoo Finance is NOT used — its US-based servers block Railway's datacenter IPs
+with HTTP 429 regardless of headers/cookies.
 """
 
 from __future__ import annotations
 
-import threading
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from utils.config_loader import load_config
 from utils.logger import get_logger
@@ -23,181 +24,130 @@ from utils.market_hours import is_market_open, get_closed_markets_message
 
 logger = get_logger("bot1")
 
-# How many days back to fetch per timeframe
-YF_PERIOD_DAYS = {
-    "1m":  1,
-    "5m":  5,
-    "15m": 5,
+# ── Twelve Data ────────────────────────────────────────────────────────────────
+
+TWELVE_DATA_BASE = "https://api.twelvedata.com/time_series"
+
+# Map config symbols → Twelve Data symbols
+TWELVE_DATA_SYMBOLS: dict[str, str] = {
+    # NIFTY stocks
+    "RELIANCE.NS":  "RELIANCE:NSE",
+    "HDFCBANK.NS":  "HDFCBANK:NSE",
+    "TCS.NS":       "TCS:NSE",
+    "INFY.NS":      "INFY:NSE",
+    "ICICIBANK.NS": "ICICIBANK:NSE",
+    "WIPRO.NS":     "WIPRO:NSE",
+    "SBIN.NS":      "SBIN:NSE",
+    # Forex
+    "EURUSD=X":     "EUR/USD",
+    "GBPUSD=X":     "GBP/USD",
+    "USDJPY=X":     "USD/JPY",
+    "AUDUSD=X":     "AUD/USD",
+    "USDCAD=X":     "USD/CAD",
+    # Gold / Commodities
+    "GC=F":         "XAU/USD",
+    "SI=F":         "XAG/USD",
 }
 
-# OKX symbol format (ccxt standard)
-CCXT_SYMBOL_MAP = {
+# Map config timeframe → Twelve Data interval
+TWELVE_DATA_TF: dict[str, str] = {
+    "1m":  "1min",
+    "5m":  "5min",
+    "15m": "15min",
+    "1h":  "1h",
+    "4h":  "4h",
+    "1d":  "1day",
+}
+
+# ── OKX (CRYPTO) ───────────────────────────────────────────────────────────────
+
+CCXT_SYMBOL_MAP: dict[str, str] = {
     "BTC-USD": "BTC/USDT",
     "ETH-USD": "ETH/USDT",
     "BNB-USD": "BNB/USDT",
     "SOL-USD": "SOL/USDT",
 }
 
-# ── Yahoo Finance session cache (one session shared across all calls) ──────────
 
-_YF_LOCK         = threading.Lock()
-_YF_REQ_SEM      = threading.Semaphore(1)   # One Yahoo Finance request at a time
-_YF_LAST_REQ_TS  = 0.0
-_YF_MIN_INTERVAL = 0.4                       # Seconds between requests
-_YF_SESSION      = None
-_YF_CRUMB: str | None = None                 # None = never fetched; "" = fetched but empty
-_YF_SESSION_TS   = 0.0
-_YF_SESSION_TTL  = 3600                      # Refresh session every hour
+# ── Fetchers ───────────────────────────────────────────────────────────────────
 
-
-def _get_yf_session():
+def _fetch_twelve_data(symbol: str, timeframes: list[str], min_bars: int) -> dict:
     """
-    Return a cached (session, crumb) pair for Yahoo Finance.
-    Uses `_YF_CRUMB is not None` so an empty crumb string is still cached
-    (prevents all parallel threads from each triggering a refresh).
+    Fetch OHLCV from Twelve Data API.
+    Requires TWELVE_DATA_API_KEY environment variable (free at twelvedata.com).
+    800 API credits/day on free tier — 1 credit per request.
     """
-    global _YF_SESSION, _YF_CRUMB, _YF_SESSION_TS
+    import requests
 
-    with _YF_LOCK:
-        if _YF_SESSION is not None and _YF_CRUMB is not None \
-                and (time.time() - _YF_SESSION_TS) < _YF_SESSION_TTL:
-            return _YF_SESSION, _YF_CRUMB
+    api_key = os.environ.get("TWELVE_DATA_API_KEY", "")
+    if not api_key:
+        return {"fetch_status": "error", "error": "TWELVE_DATA_API_KEY not set"}
 
-        import requests
-        s = requests.Session()
-        s.headers.update({
-            "User-Agent": (
-                "Mozilla/5.0 (X11; Linux x86_64; rv:121.0) "
-                "Gecko/20100101 Firefox/121.0"
-            ),
-            "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Accept-Encoding": "gzip, deflate, br",
-            "DNT":             "1",
-            "Connection":      "keep-alive",
-        })
+    td_symbol = TWELVE_DATA_SYMBOLS.get(symbol)
+    if not td_symbol:
+        return {"fetch_status": "error", "error": f"No Twelve Data mapping for {symbol}"}
 
-        # Visit Yahoo Finance to pick up consent cookies
-        for url in ["https://fc.yahoo.com", "https://finance.yahoo.com"]:
-            try:
-                s.get(url, timeout=8)
-            except Exception:
-                pass
-
-        # Fetch crumb (required for authenticated chart API calls)
-        crumb = ""
-        for endpoint in [
-            "https://query1.finance.yahoo.com/v1/test/getcrumb",
-            "https://query2.finance.yahoo.com/v1/test/getcrumb",
-        ]:
-            try:
-                r = s.get(endpoint, timeout=8)
-                if r.status_code == 200 and r.text and len(r.text) < 50:
-                    crumb = r.text.strip()
-                    break
-            except Exception:
-                pass
-
-        _YF_SESSION    = s
-        _YF_CRUMB      = crumb
-        _YF_SESSION_TS = time.time()
-        logger.info(f"Yahoo Finance session refreshed (crumb={'ok' if crumb else 'empty'})")
-        return s, crumb
-
-
-def _fetch_yfinance(symbol: str, timeframes: list[str], min_bars: int) -> dict:
-    """
-    Fetch OHLCV from Yahoo Finance v8 chart API.
-    Uses direct HTTP with consent cookies + crumb — reliable from cloud IPs.
-    """
-    session, crumb = _get_yf_session()
     tf_data: dict = {}
+    session = requests.Session()
+    session.headers["User-Agent"] = "TradingBot/1.0"
 
     for tf in timeframes:
-        period_days = YF_PERIOD_DAYS.get(tf, 5)
-        end_ts   = int(time.time())
-        start_ts = int((datetime.utcnow() - timedelta(days=period_days)).timestamp())
-
-        params: dict = {
-            "period1":        start_ts,
-            "period2":        end_ts,
-            "interval":       tf,
-            "includePrePost": "false",
-            "events":         "history",
-        }
-        if crumb:
-            params["crumb"] = crumb
+        td_interval = TWELVE_DATA_TF.get(tf)
+        if not td_interval:
+            tf_data[tf] = None
+            continue
 
         try:
-            # Serialise all Yahoo Finance requests + enforce minimum interval
-            with _YF_REQ_SEM:
-                global _YF_LAST_REQ_TS
-                elapsed = time.time() - _YF_LAST_REQ_TS
-                if elapsed < _YF_MIN_INTERVAL:
-                    time.sleep(_YF_MIN_INTERVAL - elapsed)
+            resp = session.get(
+                TWELVE_DATA_BASE,
+                params={
+                    "symbol":     td_symbol,
+                    "interval":   td_interval,
+                    "apikey":     api_key,
+                    "outputsize": 100,
+                    "order":      "ASC",
+                },
+                timeout=15,
+            )
 
-                resp = session.get(
-                    f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
-                    params=params,
-                    timeout=15,
-                )
-                _YF_LAST_REQ_TS = time.time()
-
-            # Process response outside the semaphore
             if resp.status_code != 200:
-                logger.warning(f"{symbol} {tf}: HTTP {resp.status_code} from Yahoo")
+                logger.warning(f"{symbol} {tf}: Twelve Data HTTP {resp.status_code}")
                 tf_data[tf] = None
                 continue
 
-            data   = resp.json()
-            result = data.get("chart", {}).get("result") or []
-            if not result:
-                err = data.get("chart", {}).get("error", {})
-                logger.warning(f"{symbol} {tf}: no result — {err}")
+            data = resp.json()
+
+            if data.get("status") == "error":
+                logger.warning(f"{symbol} {tf}: Twelve Data error — {data.get('message')}")
                 tf_data[tf] = None
                 continue
 
-            chart      = result[0]
-            timestamps = chart.get("timestamp") or []
-            quote      = (chart.get("indicators", {}).get("quote") or [{}])[0]
-
-            opens   = quote.get("open",   [])
-            highs   = quote.get("high",   [])
-            lows    = quote.get("low",    [])
-            closes  = quote.get("close",  [])
-            volumes = quote.get("volume", [])
-
-            # Drop bars where any OHLC value is None (market gaps / pre-open slots)
-            rows = [
-                (t, o, h, l, c, v or 0)
-                for t, o, h, l, c, v in zip(timestamps, opens, highs, lows, closes, volumes)
-                if None not in (o, h, l, c)
-            ]
-
-            if len(rows) < min_bars:
-                logger.warning(f"{symbol} {tf}: only {len(rows)} valid bars (need {min_bars})")
+            values = data.get("values", [])
+            if len(values) < min_bars:
+                logger.warning(f"{symbol} {tf}: only {len(values)} bars (need {min_bars})")
                 tf_data[tf] = None
                 continue
 
             tf_data[tf] = {
-                "opens":      [r[1] for r in rows],
-                "highs":      [r[2] for r in rows],
-                "lows":       [r[3] for r in rows],
-                "closes":     [r[4] for r in rows],
-                "volumes":    [r[5] for r in rows],
-                "timestamps": [str(datetime.utcfromtimestamp(r[0])) for r in rows],
-                "count":      len(rows),
+                "opens":      [float(v["open"])   for v in values],
+                "highs":      [float(v["high"])   for v in values],
+                "lows":       [float(v["low"])    for v in values],
+                "closes":     [float(v["close"])  for v in values],
+                "volumes":    [float(v.get("volume", 0) or 0) for v in values],
+                "timestamps": [v["datetime"]      for v in values],
+                "count":      len(values),
             }
+            time.sleep(0.2)   # Stay within Twelve Data rate limits
 
         except Exception as e:
-            logger.error(f"{symbol} {tf} fetch error: {e}")
+            logger.error(f"{symbol} {tf} Twelve Data error: {e}")
             tf_data[tf] = None
 
     current_price = None
     try:
-        closes_data = (tf_data.get("15m") or tf_data.get("5m") or tf_data.get("1m") or {}).get("closes")
-        if closes_data:
-            current_price = closes_data[-1]
+        closes = (tf_data.get("15m") or tf_data.get("5m") or tf_data.get("1m") or {}).get("closes")
+        if closes:
+            current_price = closes[-1]
     except Exception:
         pass
 
@@ -267,7 +217,7 @@ def _fetch_symbol(symbol: str, market: str, timeframes: list[str], min_bars: int
     """Dispatch to correct fetcher based on market type."""
     if market == "CRYPTO":
         return _fetch_ccxt(symbol, timeframes, min_bars)
-    return _fetch_yfinance(symbol, timeframes, min_bars)
+    return _fetch_twelve_data(symbol, timeframes, min_bars)
 
 
 class DataCollectorBot:

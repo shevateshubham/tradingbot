@@ -1,9 +1,9 @@
 # Trading Pipeline — Dependencies
 # All versions pinned for reproducible Railway deployments
 
-# Market data (free APIs, no key required for basic usage)
-yfinance==0.2.40
-ccxt==4.3.68
+# Market data
+ccxt==4.3.68          # CRYPTO via OKX (no API key)
+requests==2.32.3      # Twelve Data API (NIFTY/FOREX/GOLD)
 
 # Telegram bot
 python-telegram-bot[job-queue]==21.3
@@ -27,5 +27,5 @@ tenacity==8.3.0
 # Structured logging
 structlog==24.2.0
 
-# Data manipulation (yfinance returns DataFrames)
+# Data manipulation
 pandas==2.2.2
