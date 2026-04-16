@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from apscheduler.triggers.cron import CronTrigger
 import pytz
 
+from telegram.error import Conflict, NetworkError, TimedOut
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler
 
 from utils.logger import get_logger
@@ -140,8 +141,22 @@ def main() -> None:
     app.add_handler(CommandHandler("autoscan", autoscan_command))
     app.add_handler(CallbackQueryHandler(button_callback))
 
+    # ── Error handler — prevent Conflict/network errors from crashing the bot ──
+    async def error_handler(update, context):
+        err = context.error
+        if isinstance(err, Conflict):
+            # Another instance briefly running during redeploy — harmless, will resolve
+            logger.warning("Telegram Conflict: another instance detected, retrying...")
+            return
+        if isinstance(err, (NetworkError, TimedOut)):
+            logger.warning(f"Telegram network error (will retry): {err}")
+            return
+        logger.error(f"Unhandled Telegram error: {err}", exc_info=err)
+
+    app.add_error_handler(error_handler)
+
     logger.info("Telegram bot starting — send /start to begin")
-    app.run_polling(poll_interval=1.0, timeout=30, drop_pending_updates=True)
+    app.run_polling(poll_interval=2.0, timeout=30, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
