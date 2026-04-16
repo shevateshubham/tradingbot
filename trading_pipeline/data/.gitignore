@@ -1,0 +1,7 @@
+# Ignore all runtime data files — only keep directory structure (.gitkeep)
+*.json
+*.jsonl
+*.csv
+
+# Keep placeholder files
+!.gitkeep
