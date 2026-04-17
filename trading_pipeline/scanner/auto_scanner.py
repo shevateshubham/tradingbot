@@ -45,6 +45,7 @@ GRADE_ORDER = {"C": 0, "B": 1, "A": 2, "A+": 3}
 
 _scheduler: BackgroundScheduler | None = None
 JOB_ID = "auto_scan"
+_market_was_open: bool = True   # track open→close transition
 
 
 # ── Deduplication ──────────────────────────────────────────────────────────────
@@ -356,38 +357,74 @@ def _followup_job(sym: str, market: str) -> None:
 
 # ── Main auto-scan job ─────────────────────────────────────────────────────────
 
+def _notify_market_closed(market: str, config: dict) -> None:
+    """Send a Telegram message that the market has closed and scanning has stopped."""
+    import os, httpx
+    token   = os.environ.get("TELEGRAM_BOT_TOKEN") or config.get("telegram", {}).get("bot_token", "")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID") or config.get("telegram", {}).get("chat_id", "")
+    if not token or not chat_id:
+        return
+    text = (
+        f"🔒 <b>{market} market is now closed.</b>\n\n"
+        f"Continuous scan has stopped automatically.\n"
+        f"Tap /start when the market reopens to begin scanning again."
+    )
+    try:
+        httpx.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+            timeout=10.0,
+        )
+    except Exception as e:
+        logger.warning(f"Could not send market-closed notification: {e}")
+
+
 def run_auto_scan() -> None:
     """
     Scheduled job — runs every N minutes.
-    Scans all open markets and sends qualifying signals.
+    Scans the configured market and sends A/A+ TRADE signals.
+    Auto-stops when the market closes and notifies the user.
     """
+    global _market_was_open
     config = load_config()
     auto   = config.get("auto_scan", {})
 
     if not auto.get("enabled", False):
         return
 
-    min_conf         = auto.get("min_confidence_auto", 70)
+    min_conf         = auto.get("min_confidence_auto", 75)
     dedup_window     = auto.get("dedup_window_minutes", 60)
     send_watches     = auto.get("send_watches", False)
     followup_minutes = auto.get("watch_followup_minutes", 5)
-
-    trade_type   = auto.get("trade_type", "intraday")
-    scan_market  = auto.get("market", "")   # single market preference if set
+    trade_type       = auto.get("trade_type", "intraday")
+    scan_market      = auto.get("market", "")
 
     open_markets = get_open_markets(config)
+
+    # Determine target markets
     if scan_market and scan_market != "ALL":
-        # User configured a specific market
-        target_markets = [scan_market] if (scan_market in open_markets or
-                          scan_market == "CRYPTO") else []
+        market_is_open = scan_market in open_markets or scan_market == "CRYPTO"
+        target_markets = [scan_market] if market_is_open else []
     else:
         target_markets = [m for m in auto.get("markets", config.get("markets", [])) if m in open_markets]
 
-    if not target_markets:
-        logger.debug("Auto-scan: no open markets")
+    # Detect open → closed transition — stop scanner and notify
+    if not target_markets and _market_was_open and scan_market and scan_market != "CRYPTO":
+        logger.info(f"Auto-scan: {scan_market} just closed — stopping scanner")
+        _market_was_open = False
+        stop_auto_scanner()
+        auto["enabled"] = False
+        config["auto_scan"] = auto
+        save_config(config)
+        _notify_market_closed(scan_market, config)
         return
 
-    logger.info(f"Auto-scan — markets: {target_markets} | type: {trade_type}")
+    if not target_markets:
+        logger.debug("Auto-scan: market closed, scanner already stopped")
+        return
+
+    _market_was_open = True
+    logger.info(f"Auto-scan — market: {target_markets} | type: {trade_type}")
     total_sent = 0
 
     for market in target_markets:
