@@ -167,19 +167,27 @@ def _analyze_symbol(symbol_data: dict, config: dict, htf_tf: str = "15m") -> dic
     # Context Score (0-100)
     score = 0
 
-    # HTF bias: 40 pts (confirmed = 40, partial = 20)
+    # HTF bias: 40 pts (confirmed strength≥2), 20 pts (partial), 5 pts (NEUTRAL — ranging market)
     if bias == "BULLISH":
         score += 40 if strength >= 2 else 20
     elif bias == "BEARISH":
         score += 40 if strength >= 2 else 20
+    else:
+        score += 5  # NEUTRAL still gets a small credit — market hasn't broken structure
 
-    # Price in correct zone: 30 pts
-    # For bullish bias: discount is ideal entry zone
-    # For bearish bias: premium is ideal entry zone
-    if bias == "BULLISH" and pd["in_discount"]:
-        score += 30 if pd["in_deep_discount"] else 20
-    elif bias == "BEARISH" and pd["in_premium"]:
-        score += 30 if pd["in_deep_premium"] else 20
+    # Price zone: 25 pts for deep zone, 15 pts for zone edge — awarded REGARDLESS of bias
+    # (Price at an extreme is significant even in a ranging/NEUTRAL market)
+    zone_score = 0
+    if pd["in_deep_discount"] or pd["in_deep_premium"]:
+        zone_score = 25
+    elif pd["in_discount"] or pd["in_premium"]:
+        zone_score = 15
+
+    # Alignment bonus: bias direction matches the zone price is sitting in (+10)
+    if (bias == "BULLISH" and pd["in_discount"]) or (bias == "BEARISH" and pd["in_premium"]):
+        zone_score = min(30, zone_score + 10)
+
+    score += zone_score
 
     # Liquidity zones nearby (within 0.5% of price): 30 pts
     if current_price > 0:

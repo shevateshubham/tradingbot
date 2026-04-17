@@ -174,8 +174,8 @@ class DecisionBot:
                     logger.info(f"  {sym}: WATCH [{grade}] conf={conf}")
                 else:
                     no_trades += 1
-                    logger.debug(
-                        f"  {sym}: NO_TRADE conf={conf} reason={decision.get('reject_reason')}"
+                    logger.info(
+                        f"  {sym}: NO_TRADE conf={conf:.0f}% reason={decision.get('reject_reason')}"
                     )
             except Exception as e:
                 logger.error(f"  {sym} decision error: {e}")

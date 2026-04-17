@@ -12,7 +12,7 @@ from utils.logger import get_logger
 logger = get_logger("bot4")
 
 # Minimum setup score to bother with trigger analysis (saves CPU)
-MIN_SETUP_SCORE_FOR_TRIGGER = 35
+MIN_SETUP_SCORE_FOR_TRIGGER = 25
 
 
 def _detect_ltf_bos(

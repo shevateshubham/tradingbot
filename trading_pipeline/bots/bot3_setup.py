@@ -235,7 +235,7 @@ def _infer_direction(htf_bias: str, sweep_type: str) -> str:
     return "SHORT"
 
 
-def _analyze_symbol(sym_data: dict, config: dict) -> dict:
+def _analyze_symbol(sym_data: dict, config: dict, ltf_tf: str = "15m") -> dict:
     tf_data   = sym_data.get("timeframes", {})
     context   = sym_data.get("context", {})
     htf_bias  = context.get("htf_bias", "NEUTRAL")
@@ -243,18 +243,25 @@ def _analyze_symbol(sym_data: dict, config: dict) -> dict:
     swing_l   = context.get("swing_lows", [])
     lookback  = config.get("ob_lookback_bars", 30)
 
-    # Use 15m for OB/sweep, 5m for FVG (more precise)
-    tf_15 = tf_data.get("15m") or {}
-    tf_5  = tf_data.get("5m") or tf_15
+    # Use LTF for OB/sweep detection; fall back through standard cascade
+    tf_setup = (tf_data.get(ltf_tf) or
+                tf_data.get("15m") or tf_data.get("5m") or
+                tf_data.get("1h") or tf_data.get("4h") or {})
 
-    if not tf_15:
-        return {"setup_score": 0, "error": "no_15m_data"}
+    # FVG uses one finer timeframe than the setup TF for precision
+    finer_tf_order = ["1m", "5m", "15m", "1h", "4h", "1d"]
+    ltf_idx = next((i for i, k in enumerate(finer_tf_order) if k == ltf_tf), 2)
+    finer_tf = finer_tf_order[max(0, ltf_idx - 1)]
+    tf_fvg = tf_data.get(finer_tf) or tf_setup
 
-    opens   = tf_15.get("opens", [])
-    highs   = tf_15.get("highs", [])
-    lows    = tf_15.get("lows", [])
-    closes  = tf_15.get("closes", [])
-    volumes = tf_15.get("volumes", [])
+    if not tf_setup:
+        return {"setup_score": 0, "error": f"no_setup_tf_data (tried {ltf_tf})"}
+
+    opens   = tf_setup.get("opens", [])
+    highs   = tf_setup.get("highs", [])
+    lows    = tf_setup.get("lows", [])
+    closes  = tf_setup.get("closes", [])
+    volumes = tf_setup.get("volumes", [])
 
     if len(highs) < 10:
         return {"setup_score": 0, "error": "insufficient_bars"}
@@ -269,10 +276,10 @@ def _analyze_symbol(sym_data: dict, config: dict) -> dict:
     # Order block
     ob = _detect_order_block(highs, lows, opens, closes, direction, lookback, atr_val)
 
-    # FVG (on 5m for precision)
-    h5 = tf_5.get("highs", highs)
-    l5 = tf_5.get("lows", lows)
-    c5 = tf_5.get("closes", closes)
+    # FVG (on finer timeframe for precision)
+    h5 = tf_fvg.get("highs", highs)
+    l5 = tf_fvg.get("lows", lows)
+    c5 = tf_fvg.get("closes", closes)
     fvg = _detect_fvg(h5, l5, c5, direction)
 
     # Inducement
@@ -332,8 +339,9 @@ class SetupBot:
     """Bot 3: Detects SMC setups — OB, FVG, sweeps, inducement, traps."""
 
     def run(self, pipeline_dict: dict) -> dict:
-        config = load_config()
+        config  = load_config()
         symbols = pipeline_dict.get("symbols", {})
+        ltf_tf  = pipeline_dict.get("trade_type_config", {}).get("ltf_tf", "15m")
         processed = 0
 
         for sym, sym_data in symbols.items():
@@ -341,7 +349,7 @@ class SetupBot:
                 sym_data["setup"] = {"setup_score": 0, "skipped": True}
                 continue
             try:
-                sym_data["setup"] = _analyze_symbol(sym_data, config)
+                sym_data["setup"] = _analyze_symbol(sym_data, config, ltf_tf)
                 processed += 1
                 s = sym_data["setup"]
                 logger.info(

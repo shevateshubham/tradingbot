@@ -171,9 +171,12 @@ def _fetch_tradingview(symbol: str, timeframes: list[str], min_bars: int) -> dic
 
     current_price = None
     try:
-        closes = (tf_data.get("15m") or tf_data.get("5m") or tf_data.get("1m") or {}).get("closes")
-        if closes:
-            current_price = closes[-1]
+        # Use the most granular successfully-fetched timeframe for current price
+        for tf_key in ["1m", "5m", "15m", "1h", "4h", "1d"]:
+            closes = (tf_data.get(tf_key) or {}).get("closes")
+            if closes:
+                current_price = closes[-1]
+                break
     except Exception:
         pass
 
