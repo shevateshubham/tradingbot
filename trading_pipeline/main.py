@@ -100,12 +100,20 @@ def main() -> None:
 
     if not token or token == "SET_ME":
         logger.error("TELEGRAM_BOT_TOKEN not configured — bot idle, health endpoint alive")
-        # Keep process alive so Railway healthcheck keeps passing
         import time
         while True:
             time.sleep(60)
 
-    # ── Shared APScheduler (used for both auto-scan + weekly review)
+    # ── Always start with scanning OFF — user picks market/style manually ──
+    from utils.config_loader import save_config
+    auto = config.get("auto_scan", {})
+    if auto.get("enabled", False):
+        auto["enabled"] = False
+        config["auto_scan"] = auto
+        save_config(config)
+        logger.info("Startup: scanner reset to OFF — waiting for user selection")
+
+    # ── Shared APScheduler (weekly review only on startup) ──
     scheduler = get_scheduler()
 
     # Weekly review: every Sunday 8 PM IST
@@ -117,15 +125,9 @@ def main() -> None:
         replace_existing=True,
     )
 
-    # Auto-scan: start immediately if enabled in config
-    auto = config.get("auto_scan", {})
-    if auto.get("enabled", False):
-        interval = auto.get("interval_minutes", 15)
-        start_auto_scanner(interval)
-        logger.info(f"Auto-scan ENABLED — every {interval} minutes")
-    else:
-        scheduler.start()   # Still need scheduler for weekly review
-        logger.info("Auto-scan DISABLED — use /autoscan on to enable")
+    # Scheduler runs for weekly review only — scanning starts when user selects market
+    scheduler.start()
+    logger.info("Scheduler started (weekly review only) — all markets stopped at startup")
 
     logger.info("Scheduler started — weekly review: Sundays 20:00 IST")
 
