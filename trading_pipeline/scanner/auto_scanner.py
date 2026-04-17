@@ -262,7 +262,7 @@ def _process_symbol(
                 (action == "WATCH" and send_watches and conf >= min_conf * 0.80)
 
     if not qualifies:
-        logger.debug(f"  {sym}: {action} {conf:.0f}% — below threshold, skipping")
+        logger.info(f"  {sym}: {action} {conf:.0f}% — below threshold (min={min_conf}), skipping")
         return 0
 
     # Smart dedup check
@@ -420,7 +420,7 @@ def run_auto_scan() -> None:
         return
 
     if not target_markets:
-        logger.debug("Auto-scan: market closed, scanner already stopped")
+        logger.info(f"Auto-scan: {scan_market} is closed — skipping this cycle")
         return
 
     _market_was_open = True
@@ -475,9 +475,9 @@ def start_auto_scanner(interval_minutes: int) -> None:
         id               = JOB_ID,
         name             = f"Auto-scan every {interval_minutes}m",
         replace_existing = True,
-        next_run_time    = datetime.now(timezone.utc),  # Run immediately on start
+        # First run after one interval — button_callback already ran an initial scan
     )
-    logger.info(f"Auto-scan scheduled: every {interval_minutes} minutes")
+    logger.info(f"Auto-scan scheduled: every {interval_minutes} minutes (first run in {interval_minutes}m)")
 
 
 def stop_auto_scanner() -> None:
