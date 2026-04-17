@@ -13,7 +13,7 @@
       "htf_tf":                 "15m",
       "ltf_tf":                 "1m",
       "min_rr":                 1.5,
-      "scan_interval_minutes":  3,
+      "scan_interval_minutes":  2,
       "description":            "1-15 min trades, tight SL, fast R:R 1.5"
     },
     "intraday": {
@@ -22,7 +22,7 @@
       "htf_tf":                 "1h",
       "ltf_tf":                 "5m",
       "min_rr":                 2.0,
-      "scan_interval_minutes":  15,
+      "scan_interval_minutes":  5,
       "description":            "Same-day trades, 5m entry, 1h context, R:R 2.0"
     },
     "short_term": {
@@ -31,7 +31,7 @@
       "htf_tf":                 "1d",
       "ltf_tf":                 "1h",
       "min_rr":                 2.5,
-      "scan_interval_minutes":  60,
+      "scan_interval_minutes":  15,
       "description":            "Days to weeks, 1h entry, daily context, R:R 2.5"
     },
     "long_term": {
@@ -40,7 +40,7 @@
       "htf_tf":                 "1d",
       "ltf_tf":                 "4h",
       "min_rr":                 3.0,
-      "scan_interval_minutes":  240,
+      "scan_interval_minutes":  60,
       "description":            "Weeks to months, 4h entry, daily context, R:R 3.0"
     }
   },
@@ -49,7 +49,7 @@
     "context_weight": 0.40,
     "setup_weight":   0.40,
     "trigger_weight": 0.20,
-    "min_confidence": 70,
+    "min_confidence": 75,
     "min_rr_ratio":   2.0,
     "max_sl_percent": 2.0
   },
@@ -71,7 +71,7 @@
     "trade_type":             "intraday",
     "interval_minutes":       15,
     "markets":                ["NIFTY", "FOREX", "CRYPTO", "GOLD"],
-    "min_confidence_auto":    70,
+    "min_confidence_auto":    75,
     "dedup_window_minutes":   60,
     "send_watches":           false,
     "watch_followup_minutes": 5

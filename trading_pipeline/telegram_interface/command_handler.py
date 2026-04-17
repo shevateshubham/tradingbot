@@ -68,29 +68,6 @@ def _trade_type_keyboard(market: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
-def _symbol_selection_keyboard(market: str, trade_type: str, scored: list) -> InlineKeyboardMarkup:
-    buttons = []
-    for sym, action, conf, grade, _ in scored:
-        emoji = "🟢" if action == "TRADE" else ("👀" if action == "WATCH" else "❌")
-        buttons.append([InlineKeyboardButton(
-            f"{emoji} {sym}  {conf:.0f}%  [{grade}]",
-            callback_data=f"signal:{market}:{sym}",
-        )])
-    buttons.append([
-        InlineKeyboardButton("🔄 Re-scan",  callback_data=f"tradetype:{market}:{trade_type}"),
-        InlineKeyboardButton("📋 Markets",  callback_data="markets"),
-    ])
-    return InlineKeyboardMarkup(buttons)
-
-
-def _after_signal_keyboard(market: str, trade_type: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🔄 Re-scan",      callback_data=f"tradetype:{market}:{trade_type}"),
-            InlineKeyboardButton("📋 Markets",      callback_data="markets"),
-        ],
-        [InlineKeyboardButton("📊 Weekly Stats",    callback_data="weekly_stats")],
-    ])
 
 
 # ── Pipeline runner ────────────────────────────────────────────────────────────
@@ -129,55 +106,6 @@ def _run_pipeline_scoring(market: str, trade_type: str) -> dict:
     pipeline = DecisionBot().run(pipeline)
     return pipeline
 
-
-def _extract_ranked_symbols(pipeline: dict) -> list[tuple]:
-    ranked = []
-    for sym, sym_data in pipeline.get("symbols", {}).items():
-        if sym_data.get("fetch_status") != "ok":
-            continue
-        dec    = sym_data.get("decision", {})
-        action = dec.get("action", "NO_TRADE")
-        conf   = dec.get("confidence_score", 0.0)
-        grade  = dec.get("grade", "C")
-        setup  = sym_data.get("setup", {}).get("setup_type", "—")
-        ranked.append((sym, action, conf, grade, setup))
-    ranked.sort(key=lambda x: x[2], reverse=True)
-    return ranked
-
-
-def _build_scan_summary(market: str, trade_type: str, ranked: list, pipeline: dict) -> str:
-    config    = load_config()
-    tt_label  = config.get("trade_types", {}).get(trade_type, {}).get("label", trade_type)
-    timestamp = datetime.now(timezone.utc).strftime("%H:%M UTC")
-    lines     = [f"📊 <b>{market} · {tt_label} — {timestamp}</b>\n"]
-
-    if not ranked:
-        lines.append("No data fetched. Market may be closed or API unavailable.")
-        return "\n".join(lines)
-
-    for sym, action, conf, grade, setup_type in ranked:
-        sym_data  = pipeline["symbols"].get(sym, {})
-        htf_bias  = sym_data.get("context", {}).get("htf_bias", "?")
-        direction = sym_data.get("setup", {}).get("direction", "?")
-        swept     = sym_data.get("setup", {}).get("liquidity_swept", False)
-        bos       = sym_data.get("trigger", {}).get("ltf_bos", False)
-        trap      = sym_data.get("setup", {}).get("trap_detected", False)
-
-        status = "🟢 TRADE" if action == "TRADE" else ("👀 WATCH" if action == "WATCH" else "❌ SKIP")
-        tags   = (["Sweep✓"] if swept else []) + (["BOS✓"] if bos else []) + (["⚠️Trap"] if trap else [])
-        tag_str = "  " + " ".join(tags) if tags else ""
-
-        lines.append(
-            f"<b>{sym}</b>  {status}  {conf:.0f}% [{grade}]\n"
-            f"  HTF: {htf_bias} | Dir: {direction} | {setup_type}{tag_str}"
-        )
-
-    actionable = sum(1 for _, a, _, _, _ in ranked if a in ("TRADE", "WATCH"))
-    lines.append(
-        f"\n<i>{actionable} actionable setup{'s' if actionable != 1 else ''} found.</i>\n"
-        f"👇 Tap a symbol for the full trade signal:"
-    )
-    return "\n".join(lines)
 
 
 # ── Command handlers ───────────────────────────────────────────────────────────
@@ -330,12 +258,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    # ── Step 2: Trade type selected → scan immediately ────────────────────────
+    # ── Step 2: Trade type selected → scan → send signals directly ───────────
     if data.startswith("tradetype:"):
         _, market, trade_type = data.split(":", 2)
         config    = load_config()
         tt_config = _get_trade_type_config(trade_type, config)
         label     = tt_config.get("label", trade_type)
+        interval  = tt_config.get("scan_interval_minutes", 5)
 
         set_trade_type(chat_id, trade_type)
 
@@ -348,9 +277,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         disabled    = set(config.get("disabled_symbols", []))
         active_syms = [s for s in syms if s not in disabled]
 
-        await query.message.reply_text(
-            f"⏳ Scanning <b>{market}</b> · {label} ({len(active_syms)} symbols)...{warning}\n"
-            f"Timeframes: {' → '.join(tt_config.get('timeframes', []))}",
+        scanning_msg = await query.message.reply_text(
+            f"⏳ Scanning <b>{market}</b> · {label} ({len(active_syms)} symbols)...{warning}",
             parse_mode="HTML",
         )
 
@@ -367,48 +295,53 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         update_last_run(chat_id, market, trade_type)
         context.application.bot_data[_SCAN_KEY.format(chat_id=chat_id)] = result
 
-        ranked   = _extract_ranked_symbols(result)
-        summary  = _build_scan_summary(market, trade_type, ranked, result)
-        keyboard = _symbol_selection_keyboard(market, trade_type, ranked)
-
-        await query.message.reply_text(summary, parse_mode="HTML", reply_markup=keyboard)
-        return
-
-    # ── Symbol selected → send full signal ───────────────────────────────────
-    if data.startswith("signal:"):
-        _, market, sym = data.split(":", 2)
-        key    = _SCAN_KEY.format(chat_id=chat_id)
-        result = context.application.bot_data.get(key)
-        trade_type = get_trade_type(chat_id) or "intraday"
-
-        if not result:
-            await query.message.reply_text(
-                f"⚠️ Scan data expired. Please re-scan.",
-                reply_markup=_trade_type_keyboard(market),
-            )
-            return
-
-        sym_data = result.get("symbols", {}).get(sym)
-        if not sym_data:
-            await query.message.reply_text(f"⚠️ No data for {sym}. Try re-scanning.")
-            return
-
+        # Send only high-quality TRADE signals (grade A or A+, confidence ≥ 75)
         from bots.bot6_notification import send_signal_for_symbol
-        config = load_config()
-        run_id = result.get("run_id", "unknown")
+        MIN_QUALITY_CONF  = config.get("scoring", {}).get("min_confidence", 70)
+        QUALITY_GRADES    = {"A", "A+"}
+        trade_count = watch_count = 0
+        for sym, sym_data in result.get("symbols", {}).items():
+            dec    = sym_data.get("decision", {})
+            action = dec.get("action", "NO_TRADE")
+            conf   = dec.get("confidence_score", 0)
+            grade  = dec.get("grade", "C")
+            if action == "TRADE" and grade in QUALITY_GRADES and conf >= MIN_QUALITY_CONF:
+                send_signal_for_symbol(sym, sym_data, config, result["run_id"], str(chat_id))
+                trade_count += 1
+            elif action in ("TRADE", "WATCH"):
+                watch_count += 1
 
-        msg = send_signal_for_symbol(
-            sym            = sym,
-            sym_data       = sym_data,
-            config         = config,
-            run_id         = run_id,
-            target_chat_id = str(chat_id),
-        )
-        await query.message.reply_text(
-            msg or f"Signal for {sym} sent ☝️",
-            parse_mode="HTML",
-            reply_markup=_after_signal_keyboard(market, trade_type),
-        )
+        # Summary footer
+        rescan_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton(f"🔄 Rescan {market} · {label}", callback_data=f"tradetype:{market}:{trade_type}"),
+            InlineKeyboardButton("📋 Markets", callback_data="markets"),
+        ]])
+
+        if trade_count == 0:
+            await query.message.reply_text(
+                f"📭 <b>No confident setups</b> in {market} · {label}\n"
+                f"<i>{watch_count} symbol(s) approaching — auto-scan will alert you.</i>\n\n"
+                f"Auto-scanning every <b>{interval}m</b>.",
+                parse_mode="HTML",
+                reply_markup=rescan_kb,
+            )
+        else:
+            await query.message.reply_text(
+                f"✅ <b>{trade_count} signal(s) sent above</b>\n"
+                f"Auto-scanning every <b>{interval}m</b> — next setup will be sent automatically.",
+                parse_mode="HTML",
+                reply_markup=rescan_kb,
+            )
+
+        # Enable background auto-scan with these settings
+        from scanner.auto_scanner import start_auto_scanner
+        from utils.config_loader import save_config
+        auto = config.get("auto_scan", {})
+        auto.update({"enabled": True, "market": market, "trade_type": trade_type,
+                     "interval_minutes": interval})
+        config["auto_scan"] = auto
+        save_config(config)
+        start_auto_scanner(interval)
         return
 
     # ── Other ─────────────────────────────────────────────────────────────────
