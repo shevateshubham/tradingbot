@@ -18,51 +18,41 @@ def _detect_order_block(
     direction: str, lookback: int = 30, atr_val: float = 0.0
 ) -> dict:
     """
-    Detect the most recent valid order block.
-    Ported from institutional_detector.py:153-196.
-
-    Bullish OB: last bearish candle (close < open) before a strong bullish impulse.
-    Bearish OB: last bullish candle (close > open) before a strong bearish impulse.
+    Detect the most recent valid order block scanning from RECENT to OLD.
+    Bullish OB: last bearish candle (close < open) before a bullish impulse.
+    Bearish OB: last bullish candle (close > open) before a bearish impulse.
+    The impulse must move positively in the next 3 bars.
     """
-    n = min(lookback, len(highs) - 5)
-    impulse_threshold = atr_val * 1.5 if atr_val > 0 else 0.0
+    n = len(highs)
+    if n < 8:
+        return {"found": False, "ob_high": None, "ob_low": None,
+                "ob_mid": None, "already_touched": False, "ob_index": -1}
+
+    # Scan from most recent backward; leave 3 bars after i for subsequent-move check
+    start = n - 4          # i+3 must be a valid index → i ≤ n-4
+    stop  = max(2, n - lookback - 1)
 
     ob_found = False
     ob_high  = ob_low = ob_mid = 0.0
     ob_idx   = -1
 
-    for i in range(n, 3, -1):
-        candle_range = abs(closes[i] - opens[i])
-        if candle_range < impulse_threshold and impulse_threshold > 0:
-            continue
-
+    for i in range(start, stop, -1):
         if direction == "LONG":
-            # Bearish candle before bullish impulse
-            if closes[i] < opens[i]:
-                # Check next 3 bars for strong bullish move
-                subsequent_move = closes[i + 3] - closes[i + 1] if i + 3 < len(closes) else 0
-                if subsequent_move > 0 or impulse_threshold == 0:
-                    ob_high  = highs[i]
-                    ob_low   = lows[i]
-                    ob_mid   = (ob_high + ob_low) / 2
-                    ob_idx   = i
-                    ob_found = True
-                    break
+            if closes[i] < opens[i]:                      # bearish OB candle
+                if closes[i + 3] > closes[i + 1]:         # bullish impulse after it
+                    ob_high = highs[i]; ob_low = lows[i]
+                    ob_mid  = (ob_high + ob_low) / 2
+                    ob_idx  = i; ob_found = True; break
         else:  # SHORT
-            # Bullish candle before bearish impulse
-            if closes[i] > opens[i]:
-                subsequent_move = closes[i + 1] - closes[i + 3] if i + 3 < len(closes) else 0
-                if subsequent_move > 0 or impulse_threshold == 0:
-                    ob_high  = highs[i]
-                    ob_low   = lows[i]
-                    ob_mid   = (ob_high + ob_low) / 2
-                    ob_idx   = i
-                    ob_found = True
-                    break
+            if closes[i] > opens[i]:                      # bullish OB candle
+                if closes[i + 1] > closes[i + 3]:         # bearish impulse after it
+                    ob_high = highs[i]; ob_low = lows[i]
+                    ob_mid  = (ob_high + ob_low) / 2
+                    ob_idx  = i; ob_found = True; break
 
-    # Check if OB has already been mitigated (touched by price since then)
+    # Check if OB has already been mitigated since it formed
     already_touched = False
-    if ob_found and ob_idx > 0:
+    if ob_found and ob_idx >= 0:
         subsequent_lows  = lows[ob_idx + 1:]
         subsequent_highs = highs[ob_idx + 1:]
         if direction == "LONG" and subsequent_lows:
@@ -73,8 +63,8 @@ def _detect_order_block(
     return {
         "found":           ob_found,
         "ob_high":         round(ob_high, 5) if ob_found else None,
-        "ob_low":          round(ob_low, 5) if ob_found else None,
-        "ob_mid":          round(ob_mid, 5) if ob_found else None,
+        "ob_low":          round(ob_low, 5)  if ob_found else None,
+        "ob_mid":          round(ob_mid, 5)  if ob_found else None,
         "already_touched": already_touched,
         "ob_index":        ob_idx,
     }
@@ -351,9 +341,15 @@ class SetupBot:
             try:
                 sym_data["setup"] = _analyze_symbol(sym_data, config, ltf_tf)
                 processed += 1
-                s = sym_data["setup"]
+                s  = sym_data["setup"]
+                ob = s.get("order_block", {})
                 logger.info(
                     f"  {sym}: dir={s.get('direction')} "
+                    f"swept={s.get('liquidity_swept')} "
+                    f"ob={'✓' if ob.get('found') else '✗'}"
+                    f"{'(used)' if ob.get('already_touched') else ''} "
+                    f"fvg={s.get('fvg', {}).get('present', False)} "
+                    f"trap={s.get('trap_detected')} "
                     f"type={s.get('setup_type')} "
                     f"score={s.get('setup_score')}"
                 )

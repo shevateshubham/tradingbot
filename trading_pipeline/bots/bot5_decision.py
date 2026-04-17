@@ -174,8 +174,13 @@ class DecisionBot:
                     logger.info(f"  {sym}: WATCH [{grade}] conf={conf}")
                 else:
                     no_trades += 1
+                    bd = decision.get("score_breakdown", {})
                     logger.info(
-                        f"  {sym}: NO_TRADE conf={conf:.0f}% reason={decision.get('reject_reason')}"
+                        f"  {sym}: NO_TRADE conf={conf:.0f}% "
+                        f"[ctx={bd.get('context_score',0):.0f} "
+                        f"setup={bd.get('setup_score',0):.0f} "
+                        f"trig={bd.get('trigger_score',0):.0f}] "
+                        f"reason={decision.get('reject_reason')}"
                     )
             except Exception as e:
                 logger.error(f"  {sym} decision error: {e}")
