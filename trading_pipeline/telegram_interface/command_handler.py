@@ -30,9 +30,10 @@ from telegram_interface.session_store import (
 
 logger = get_logger("telegram")
 
-VALID_MARKETS = {"NIFTY", "FOREX", "CRYPTO", "GOLD", "ALL"}
-TRADES_DIR    = Path(__file__).parent.parent / "data" / "trades"
-_SCAN_KEY     = "last_scan_{chat_id}"
+VALID_MARKETS  = {"NIFTY", "FOREX", "CRYPTO", "GOLD", "ALL"}
+TRADES_DIR     = Path(__file__).parent.parent / "data" / "trades"
+_SCAN_KEY      = "last_scan_{chat_id}"
+QUALITY_GRADES = {"A", "A+"}   # Only high-confidence signals sent to Telegram
 
 
 
@@ -116,15 +117,16 @@ def _run_pipeline_scoring(market: str, trade_type: str) -> dict:
 
 
 def _send_quality_signals(result: dict, config: dict, chat_id: str) -> int:
-    """Send TRADE signals meeting the confidence threshold. Returns count sent."""
+    """Send A/A+ TRADE signals meeting the confidence threshold. Returns count sent."""
     from bots.bot6_notification import send_signal_for_symbol
-    min_conf    = config.get("scoring", {}).get("min_confidence", 65)
+    min_conf    = config.get("scoring", {}).get("min_confidence", 75)
     trade_count = 0
     for sym, sym_data in result.get("symbols", {}).items():
         dec    = sym_data.get("decision", {})
         action = dec.get("action", "NO_TRADE")
         conf   = dec.get("confidence_score", 0)
-        if action == "TRADE" and conf >= min_conf:
+        grade  = dec.get("grade", "C")
+        if action == "TRADE" and grade in QUALITY_GRADES and conf >= min_conf:
             send_signal_for_symbol(sym, sym_data, config, result["run_id"], chat_id)
             trade_count += 1
     return trade_count
