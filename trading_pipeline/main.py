@@ -39,6 +39,7 @@ from telegram_interface.command_handler import (
     status_command,
     stop_command,
     autoscan_command,
+    debug_command,
     button_callback,
 )
 
@@ -141,6 +142,7 @@ def main() -> None:
     app.add_handler(CommandHandler("status",   status_command))
     app.add_handler(CommandHandler("stop",     stop_command))
     app.add_handler(CommandHandler("autoscan", autoscan_command))
+    app.add_handler(CommandHandler("debug",    debug_command))
     app.add_handler(CallbackQueryHandler(button_callback))
 
     # ── Error handler — prevent Conflict/network errors from crashing the bot ──

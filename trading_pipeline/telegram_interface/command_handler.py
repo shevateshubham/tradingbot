@@ -251,6 +251,57 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Run one pipeline scan and show raw scores for every symbol — no signal sent."""
+    chat_id = update.effective_chat.id
+    config  = load_config()
+    args    = context.args or []
+    market  = args[0].upper() if args else "CRYPTO"
+    trade_type = args[1].lower() if len(args) > 1 else "intraday"
+
+    await update.message.reply_text(
+        f"🔍 Debug scan: <b>{market}</b> · {trade_type}\nFetching data...",
+        parse_mode="HTML",
+    )
+
+    try:
+        loop   = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, _run_pipeline_scoring, market, trade_type
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Pipeline error: {e}")
+        return
+
+    lines = [f"📊 <b>Debug — {market} · {trade_type}</b>\n"]
+    for sym, sd in result.get("symbols", {}).items():
+        fetch  = sd.get("fetch_status", "?")
+        ctx    = sd.get("context", {})
+        setup  = sd.get("setup", {})
+        trig   = sd.get("trigger", {})
+        dec    = sd.get("decision", {})
+        c_score = ctx.get("context_score", 0)
+        s_score = setup.get("setup_score", 0)
+        t_score = trig.get("trigger_score", 0)
+        conf    = dec.get("confidence_score", 0)
+        action  = dec.get("action", "—")
+        reason  = dec.get("reject_reason", "")
+        bias    = ctx.get("htf_bias", "?")
+        trig_detail = (
+            f"bos={trig.get('ltf_bos',False)} "
+            f"disp={trig.get('displacement_candle',False)} "
+            f"vol={trig.get('volume_spike',False)}"
+        )
+        lines.append(
+            f"<b>{sym}</b> [{fetch}]\n"
+            f"  ctx={c_score} ({bias}) setup={s_score} trig={t_score} → <b>conf={conf:.0f}%</b> {action}\n"
+            f"  {trig_detail}\n"
+            f"  {reason or setup.get('setup_type','')}"
+        )
+
+    await update.message.reply_text("\n\n".join(lines), parse_mode="HTML")
+
+
 async def autoscan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config = load_config()
     await update.message.reply_text(

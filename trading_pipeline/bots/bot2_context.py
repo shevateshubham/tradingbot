@@ -167,30 +167,29 @@ def _analyze_symbol(symbol_data: dict, config: dict, htf_tf: str = "15m") -> dic
     # Context Score (0-100)
     score = 0
 
-    # HTF bias: 40 pts (confirmed strength≥2), 20 pts (partial), 5 pts (NEUTRAL — ranging market)
+    # HTF bias: confirmed (strength≥2)=40, partial=20, NEUTRAL=10
     if bias == "BULLISH":
         score += 40 if strength >= 2 else 20
     elif bias == "BEARISH":
         score += 40 if strength >= 2 else 20
     else:
-        score += 5  # NEUTRAL still gets a small credit — market hasn't broken structure
+        score += 10  # NEUTRAL — ranging market, still tradeable at extremes
 
-    # Price zone: 25 pts for deep zone, 15 pts for zone edge — awarded REGARDLESS of bias
-    # (Price at an extreme is significant even in a ranging/NEUTRAL market)
+    # Price zone: 30 pts for deep extreme, 20 pts for zone — awarded regardless of bias.
+    # Deep discount/premium is a high-probability entry area even in a ranging market.
     zone_score = 0
     if pd["in_deep_discount"] or pd["in_deep_premium"]:
-        zone_score = 25
+        zone_score = 30
     elif pd["in_discount"] or pd["in_premium"]:
-        zone_score = 15
+        zone_score = 20
 
-    # Alignment bonus: bias direction matches the zone price is sitting in (+10)
+    # Alignment bonus: HTF bias matches zone direction (+10)
     if (bias == "BULLISH" and pd["in_discount"]) or (bias == "BEARISH" and pd["in_premium"]):
-        zone_score = min(30, zone_score + 10)
+        zone_score = min(40, zone_score + 10)
 
     score += zone_score
 
     # Liquidity zones nearby (within 1% of price): 30 pts
-    # 1% covers ~$680 on BTC at 68k — appropriate for intraday/scalp proximity
     if current_price > 0:
         nearby_pct = config.get("liquidity_nearby_pct", 0.01)
         nearby = any(
