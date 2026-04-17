@@ -244,19 +244,31 @@ def _fetch_ccxt(symbol: str, timeframes: list[str], min_bars: int) -> dict:
 
 def _fetch_symbol(symbol: str, market: str, timeframes: list[str], min_bars: int) -> dict:
     """
-    Use TradingView for all markets if credentials are set.
-    Fall back to OKX/ccxt for CRYPTO if TradingView is unavailable.
+    Data source routing:
+    - TradingView: used when TRADINGVIEW_USERNAME + TRADINGVIEW_PASSWORD are set
+    - ccxt/OKX:    fallback for CRYPTO when TV creds are absent
+    - TV without creds is unreliable (delayed/blocked) so we skip it for CRYPTO
     """
-    tv_available = bool(
-        os.environ.get("TRADINGVIEW_USERNAME") or
-        TV_SYMBOL_MAP.get(symbol)  # Even without login, try TV for known symbols
+    tv_creds = bool(
+        os.environ.get("TRADINGVIEW_USERNAME") and
+        os.environ.get("TRADINGVIEW_PASSWORD")
     )
 
-    if tv_available and symbol in TV_SYMBOL_MAP:
-        return _fetch_tradingview(symbol, timeframes, min_bars)
+    if tv_creds and symbol in TV_SYMBOL_MAP:
+        result = _fetch_tradingview(symbol, timeframes, min_bars)
+        # If TV failed for a CRYPTO symbol, fall back to ccxt immediately
+        if result.get("fetch_status") == "error" and market == "CRYPTO":
+            logger.info(f"{symbol}: TV failed, trying ccxt fallback")
+            return _fetch_ccxt(symbol, timeframes, min_bars)
+        return result
 
     if market == "CRYPTO":
+        logger.info(f"{symbol}: no TV creds — using ccxt/OKX")
         return _fetch_ccxt(symbol, timeframes, min_bars)
+
+    # Non-CRYPTO without creds: try TV in delayed mode (NIFTY/FOREX/GOLD)
+    if symbol in TV_SYMBOL_MAP:
+        return _fetch_tradingview(symbol, timeframes, min_bars)
 
     return {"fetch_status": "error", "error": f"No data source configured for {symbol}"}
 

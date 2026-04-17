@@ -189,10 +189,12 @@ def _analyze_symbol(symbol_data: dict, config: dict, htf_tf: str = "15m") -> dic
 
     score += zone_score
 
-    # Liquidity zones nearby (within 0.5% of price): 30 pts
+    # Liquidity zones nearby (within 1% of price): 30 pts
+    # 1% covers ~$680 on BTC at 68k — appropriate for intraday/scalp proximity
     if current_price > 0:
+        nearby_pct = config.get("liquidity_nearby_pct", 0.01)
         nearby = any(
-            abs(lvl - current_price) / current_price < 0.005
+            abs(lvl - current_price) / current_price < nearby_pct
             for lvl in swing_highs + swing_lows
         )
         if nearby:

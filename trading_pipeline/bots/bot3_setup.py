@@ -50,15 +50,18 @@ def _detect_order_block(
                     ob_mid  = (ob_high + ob_low) / 2
                     ob_idx  = i; ob_found = True; break
 
-    # Check if OB has already been mitigated since it formed
+    # OB is mitigated only when price fully breaches through it:
+    # LONG OB: invalidated if a subsequent wick closes BELOW ob_low (full fill)
+    # SHORT OB: invalidated if a subsequent wick closes ABOVE ob_high (full fill)
+    # Retests of the zone (touching ob_high for LONG) are normal and expected.
     already_touched = False
     if ob_found and ob_idx >= 0:
         subsequent_lows  = lows[ob_idx + 1:]
         subsequent_highs = highs[ob_idx + 1:]
         if direction == "LONG" and subsequent_lows:
-            already_touched = min(subsequent_lows) < ob_high
+            already_touched = min(subsequent_lows) < ob_low    # fully breached
         elif direction == "SHORT" and subsequent_highs:
-            already_touched = max(subsequent_highs) > ob_low
+            already_touched = max(subsequent_highs) > ob_high  # fully breached
 
     return {
         "found":           ob_found,
@@ -233,9 +236,9 @@ def _analyze_symbol(sym_data: dict, config: dict, ltf_tf: str = "15m") -> dict:
     swing_l   = context.get("swing_lows", [])
     lookback  = config.get("ob_lookback_bars", 30)
 
-    # Use LTF for OB/sweep detection; fall back through standard cascade
+    # Use LTF for OB/sweep detection; fall back in ascending granularity order
     tf_setup = (tf_data.get(ltf_tf) or
-                tf_data.get("15m") or tf_data.get("5m") or
+                tf_data.get("5m") or tf_data.get("15m") or
                 tf_data.get("1h") or tf_data.get("4h") or {})
 
     # FVG uses one finer timeframe than the setup TF for precision
