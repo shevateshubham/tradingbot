@@ -146,6 +146,7 @@ def _analyze_symbol(sym_data: dict, config: dict) -> dict:
     tf_5  = tf_data.get(ltf_tf) or tf_data.get("5m") or tf_data.get("15m") or {}
     tf_1  = tf_data.get(disp_tf) or tf_5
 
+    actual_bos_tf = ltf_tf if tf_data.get(ltf_tf) else (disp_tf if tf_data.get(disp_tf) else "fallback")
     h5 = tf_5.get("highs", [])
     l5 = tf_5.get("lows", [])
     c5 = tf_5.get("closes", [])
@@ -156,8 +157,9 @@ def _analyze_symbol(sym_data: dict, config: dict) -> dict:
     c1 = tf_1.get("closes", c5)
     v1 = tf_1.get("volumes", tf_5.get("volumes", []))
 
-    # LTF BOS (on 5m)
-    bos, bos_level = _detect_ltf_bos(h5, l5, c5, direction)
+    # LTF BOS (on LTF chart — 10-bar lookback, roughly 50 min on 5m)
+    logger.debug(f"  BOS using tf={actual_bos_tf} bars={len(c5)}")
+    bos, bos_level = _detect_ltf_bos(h5, l5, c5, direction, lookback=10)
 
     # Displacement candle (on 1m)
     o1_fallback = tf_5.get("opens", [])
@@ -179,8 +181,10 @@ def _analyze_symbol(sym_data: dict, config: dict) -> dict:
         score += 35
     if vol_spike:
         score += 25
-    if setup.get("trap_detected"):
-        score = max(0, score - 50)  # Heavy penalty for trap
+    # Trap penalty: only applied when BOS is absent (trap without momentum is dangerous)
+    # Reduced from -50 to -20 — trap is a caution flag, not an absolute veto
+    if setup.get("trap_detected") and not bos:
+        score = max(0, score - 20)
 
     score = min(100, score)
 

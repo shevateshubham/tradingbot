@@ -184,35 +184,40 @@ def _detect_inducement(
 
 def _detect_trap(
     highs: list, lows: list, closes: list, volumes: list,
-    swing_highs: list, swing_lows: list, lookback: int = 8
+    swing_highs: list, swing_lows: list, lookback: int = 4
 ) -> tuple[bool, str | None]:
     """
     Detect false breakouts (traps).
-    A trap: price breaks a swing level but volume is below average AND price reverses quickly.
+    Strict criteria: price breaks AND closes back inside within 4 bars,
+    AND volume on the breakout candle was below 60% of average — clearly anemic.
+    Lookback kept short (4 bars) to avoid false positives from old candles.
     """
     n = min(lookback, len(highs))
-    if n < 4:
+    if n < 4 or not volumes:
         return False, None
 
-    recent_v = volumes[-n:]
-    avg_vol  = sum(recent_v) / len(recent_v) if recent_v else 0
+    # Use full history for volume average so a short-window spike doesn't distort it
+    avg_vol = sum(volumes[-20:]) / min(20, len(volumes)) if volumes else 0
+    if avg_vol <= 0:
+        return False, None
 
     recent_h = highs[-n:]
     recent_l = lows[-n:]
     recent_c = closes[-n:]
+    recent_v = volumes[-n:]
 
-    # Bull trap: broke above swing high with low volume, then closed back below
+    # Bull trap: wick broke above swing high, closed back below, anemic volume
     for swing_high in swing_highs:
         for i in range(len(recent_h) - 2, 0, -1):
             if recent_h[i] > swing_high and recent_c[i] < swing_high:
-                if recent_v[i] < avg_vol * 0.8:
+                if recent_v[i] < avg_vol * 0.60:
                     return True, "BULL_TRAP"
 
-    # Bear trap: broke below swing low with low volume, then closed back above
+    # Bear trap: wick broke below swing low, closed back above, anemic volume
     for swing_low in swing_lows:
         for i in range(len(recent_l) - 2, 0, -1):
             if recent_l[i] < swing_low and recent_c[i] > swing_low:
-                if recent_v[i] < avg_vol * 0.8:
+                if recent_v[i] < avg_vol * 0.60:
                     return True, "BEAR_TRAP"
 
     return False, None

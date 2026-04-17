@@ -101,6 +101,7 @@ def _get_tv_client():
 
 def _fetch_tradingview(symbol: str, timeframes: list[str], min_bars: int) -> dict:
     """Fetch OHLCV from TradingView via tvDatafeed."""
+    global _TV_CLIENT
     try:
         from tvDatafeed import Interval
     except ImportError:
@@ -121,34 +122,52 @@ def _fetch_tradingview(symbol: str, timeframes: list[str], min_bars: int) -> dic
             continue
 
         interval = getattr(Interval, interval_name)
-        try:
-            df = tv.get_hist(
-                symbol   = tv_symbol,
-                exchange = tv_exchange,
-                interval = interval,
-                n_bars   = 100,
-            )
 
-            if df is None or len(df) < min_bars:
-                logger.warning(f"{symbol} {tf}: only {len(df) if df is not None else 0} bars (need {min_bars})")
-                tf_data[tf] = None
-                continue
+        for attempt in range(3):
+            try:
+                df = tv.get_hist(
+                    symbol   = tv_symbol,
+                    exchange = tv_exchange,
+                    interval = interval,
+                    n_bars   = 100,
+                )
 
-            # tvDatafeed returns a DataFrame with columns: open, high, low, close, volume
-            tf_data[tf] = {
-                "opens":      df["open"].tolist(),
-                "highs":      df["high"].tolist(),
-                "lows":       df["low"].tolist(),
-                "closes":     df["close"].tolist(),
-                "volumes":    df["volume"].tolist(),
-                "timestamps": [str(ts) for ts in df.index.tolist()],
-                "count":      len(df),
-            }
-            time.sleep(0.3)  # Respect TradingView rate limits
+                if df is None or len(df) < min_bars:
+                    logger.warning(f"{symbol} {tf}: only {len(df) if df is not None else 0} bars (need {min_bars})")
+                    tf_data[tf] = None
+                else:
+                    tf_data[tf] = {
+                        "opens":      df["open"].tolist(),
+                        "highs":      df["high"].tolist(),
+                        "lows":       df["low"].tolist(),
+                        "closes":     df["close"].tolist(),
+                        "volumes":    df["volume"].tolist(),
+                        "timestamps": [str(ts) for ts in df.index.tolist()],
+                        "count":      len(df),
+                    }
+                break  # success (or insufficient data) — no retry needed
 
-        except Exception as e:
-            logger.error(f"{symbol} {tf} tvDatafeed error: {e}")
+            except Exception as e:
+                err_str = str(e)
+                if "429" in err_str or "Too Many Requests" in err_str:
+                    wait = 3 * (2 ** attempt)  # 3s, 6s, 12s
+                    logger.warning(f"{symbol} {tf} rate-limited (429), retry in {wait}s (attempt {attempt+1}/3)")
+                    _TV_CLIENT = None  # force fresh WebSocket on next attempt
+                    time.sleep(wait)
+                    tv = _get_tv_client()
+                elif attempt == 2:
+                    logger.error(f"{symbol} {tf} tvDatafeed error: {e}")
+                    tf_data[tf] = None
+                    break
+                else:
+                    logger.error(f"{symbol} {tf} tvDatafeed error: {e}")
+                    tf_data[tf] = None
+                    break
+        else:
+            logger.error(f"{symbol} {tf}: all retries failed (429)")
             tf_data[tf] = None
+
+        time.sleep(0.8)  # between timeframes within same symbol
 
     current_price = None
     try:
@@ -279,7 +298,7 @@ class DataCollectorBot:
 
         results: dict[str, dict] = {}
 
-        with ThreadPoolExecutor(max_workers=min(5, len(symbols_to_fetch))) as executor:
+        with ThreadPoolExecutor(max_workers=min(2, len(symbols_to_fetch))) as executor:
             futures = {
                 executor.submit(_fetch_symbol, sym, mkt, timeframes, min_bars): sym
                 for sym, mkt in symbols_to_fetch.items()
