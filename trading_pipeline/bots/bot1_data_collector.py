@@ -167,7 +167,7 @@ def _fetch_tradingview(symbol: str, timeframes: list[str], min_bars: int) -> dic
             logger.error(f"{symbol} {tf}: all retries failed (429)")
             tf_data[tf] = None
 
-        time.sleep(0.8)  # between timeframes within same symbol
+        time.sleep(0.4)  # between timeframes within same symbol
 
     current_price = None
     try:

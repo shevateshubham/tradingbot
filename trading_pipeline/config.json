@@ -13,7 +13,7 @@
       "htf_tf":                 "15m",
       "ltf_tf":                 "1m",
       "min_rr":                 1.5,
-      "scan_interval_minutes":  2,
+      "scan_interval_minutes":  1,
       "description":            "1-15 min trades, tight SL, fast R:R 1.5"
     },
     "intraday": {
@@ -22,7 +22,7 @@
       "htf_tf":                 "1h",
       "ltf_tf":                 "5m",
       "min_rr":                 2.0,
-      "scan_interval_minutes":  5,
+      "scan_interval_minutes":  2,
       "description":            "Same-day trades, 5m entry, 1h context, R:R 2.0"
     },
     "short_term": {
