@@ -22,7 +22,7 @@
       "htf_tf":                 "1h",
       "ltf_tf":                 "5m",
       "min_rr":                 2.0,
-      "scan_interval_minutes":  2,
+      "scan_interval_minutes":  1,
       "description":            "Same-day trades, 5m entry, 1h context, R:R 2.0"
     },
     "short_term": {

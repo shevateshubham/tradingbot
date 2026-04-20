@@ -255,6 +255,14 @@ def _build_summary_text(stats: dict, changes: list[str]) -> str:
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
+def _write_stamp() -> None:
+    """Record that the weekly review ran (used by main.py catch-up logic)."""
+    from datetime import timezone
+    stamp = Path(__file__).parent / "data" / ".weekly_review_last_run"
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(datetime.now(timezone.utc).isoformat())
+
+
 def run_weekly_review() -> None:
     """Full weekly review: analyze → adjust → save config → send summary."""
     logger.info("=== Weekly Review Started ===")
@@ -273,6 +281,7 @@ def run_weekly_review() -> None:
         )
         logger.info("Insufficient data for analysis — skipping config update")
         _send_telegram_summary(msg)
+        _write_stamp()
         return
 
     stats = compute_stats(closed)
@@ -288,6 +297,7 @@ def run_weekly_review() -> None:
 
     summary = _build_summary_text(stats, changes)
     _send_telegram_summary(summary)
+    _write_stamp()
     logger.info("=== Weekly Review Complete ===")
 
 
