@@ -87,32 +87,6 @@ def _run_weekly_review() -> None:
         logger.error(f"Weekly review failed: {e}")
 
 
-def _maybe_catchup_weekly_review() -> None:
-    """
-    If the bot was down on Sunday evening and missed the weekly review,
-    run it now on startup (Mon/Tue only, within 48 h of the scheduled time).
-    Uses a stamp file to avoid re-running on every restart.
-    """
-    from pathlib import Path
-    stamp = Path(__file__).parent / "data" / ".weekly_review_last_run"
-    now_ist = datetime.now(IST)
-
-    # Only catch-up on Monday or Tuesday
-    if now_ist.weekday() not in (0, 1):
-        return
-
-    # Check if review already ran this week (stamp file written by weekly_review)
-    if stamp.exists():
-        try:
-            last = datetime.fromisoformat(stamp.read_text().strip())
-            if (datetime.now(timezone.utc) - last).days < 6:
-                return  # Already ran this week
-        except Exception:
-            pass
-
-    logger.info("Catch-up: missed Sunday weekly review — running now")
-    threading.Thread(target=_run_weekly_review, daemon=True).start()
-
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -155,10 +129,6 @@ def main() -> None:
         replace_existing=True,
         misfire_grace_time=86400,
     )
-
-    # Catch-up: if we missed this week's review (bot was down on Sunday),
-    # run it now on startup if today is Mon/Tue and it hasn't run recently
-    _maybe_catchup_weekly_review()
 
     # Scheduler runs for weekly review only — scanning starts when user selects market
     scheduler.start()

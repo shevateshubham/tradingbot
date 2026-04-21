@@ -432,5 +432,29 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except Exception as e:
             await query.message.reply_text(f"Weekly stats unavailable: {e}")
 
+    elif data == "weekly_approve":
+        try:
+            from weekly_review import apply_pending_changes
+            applied = apply_pending_changes()
+            await query.message.reply_text(
+                f"✅ <b>Config changes applied:</b>\n\n{applied}\n\n"
+                f"<i>Changes are live immediately — no restart needed.</i>",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            await query.message.reply_text(f"❌ Failed to apply changes: {e}")
+
+    elif data == "weekly_skip":
+        try:
+            from weekly_review import discard_pending_changes
+            discard_pending_changes()
+        except Exception:
+            pass
+        await query.message.reply_text(
+            "❌ <b>Changes skipped.</b>\n\n"
+            "<i>Config unchanged — review again next Sunday.</i>",
+            parse_mode="HTML",
+        )
+
     elif data == "stop":
         await stop_command(update, context)

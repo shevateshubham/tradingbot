@@ -1,10 +1,17 @@
 """
-weekly_review.py — Weekly Learning & Refinement System
-Analyzes trade outcomes from data/trades/*.json, computes performance stats,
-adjusts scoring thresholds in config.json, and sends a Telegram summary.
+weekly_review.py — Weekly Signal Analysis & Self-Improvement
 
-Runs automatically via APScheduler (Sunday 8 PM IST).
-Can also be run manually: python weekly_review.py
+Runs every Sunday 8 PM IST via APScheduler.
+Analyzes ALL signals sent during the week:
+  - TRADE signals: TP1/TP2/TP3 hit vs SL hit vs still open
+  - WATCH alerts: how many upgraded to TRADE
+  - Quality breakdown by setup type and market
+  - Suggested config changes — sent for USER APPROVAL before applying
+
+Approval flow:
+  1. Review sent to Telegram with [✅ Apply] [❌ Skip] buttons
+  2. User taps Apply → config updated immediately
+  3. User taps Skip → config unchanged until next review
 """
 
 from __future__ import annotations
@@ -22,282 +29,379 @@ from utils.logger import get_logger
 
 logger = get_logger("weekly_review")
 
-TRADES_DIR = Path(__file__).parent / "data" / "trades"
+TRADES_DIR   = Path(__file__).parent / "data" / "trades"
+PENDING_FILE = Path(__file__).parent / "data" / "pending_config_changes.json"
 TELEGRAM_API = "https://api.telegram.org"
 
 
-# ── Data Loading ──────────────────────────────────────────────────────────────
+# ── Data Loading ───────────────────────────────────────────────────────────────
 
-def load_trade_history(days: int = 30) -> list[dict]:
-    """Load all trades from the past N days."""
-    trades = []
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+def load_week_signals(days: int = 7) -> list[dict]:
+    """Load ALL signals (trade records) from the past N days."""
+    signals = []
+    cutoff  = datetime.now(timezone.utc) - timedelta(days=days)
 
     for filepath in sorted(TRADES_DIR.glob("*.json")):
         try:
-            date_str = filepath.stem  # "YYYY-MM-DD"
+            date_str  = filepath.stem
             file_date = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
             if file_date < cutoff:
                 continue
             with open(filepath) as f:
-                day_trades = json.load(f)
-            trades.extend(day_trades)
+                day_signals = json.load(f)
+            signals.extend(day_signals)
         except Exception as e:
             logger.warning(f"Could not load {filepath}: {e}")
 
-    return trades
+    return signals
 
 
-# ── Statistics ────────────────────────────────────────────────────────────────
+# ── Statistics ─────────────────────────────────────────────────────────────────
 
-def compute_stats(trades: list[dict]) -> dict:
+def compute_stats(signals: list[dict]) -> dict:
     """
-    Compute win rate, avg RR, drawdown, profit factor — overall and per market.
-    Only considers closed trades (outcome != None).
+    Full stats on all signals — includes open (outcome=None) trades.
     """
-    closed = [t for t in trades if t.get("outcome") is not None]
-    total  = len(closed)
+    trades = [s for s in signals if s.get("grade") in ("A", "A+")]
+    watches = [s for s in signals if s.get("grade") == "B"]
 
-    if total == 0:
-        return {"total": 0, "insufficient_data": True}
+    closed  = [t for t in trades if t.get("outcome") is not None]
+    wins    = [t for t in closed if t.get("outcome") in ("TP1", "TP2", "TP3")]
+    losses  = [t for t in closed if t.get("outcome") == "SL"]
+    open_t  = [t for t in trades if t.get("outcome") is None]
 
-    wins   = [t for t in closed if t.get("outcome") in ("TP1", "TP2", "TP3")]
-    losses = [t for t in closed if t.get("outcome") == "SL"]
+    tp1_hits = sum(1 for t in closed if t.get("outcome") == "TP1")
+    tp2_hits = sum(1 for t in closed if t.get("outcome") == "TP2")
+    tp3_hits = sum(1 for t in closed if t.get("outcome") == "TP3")
 
-    win_rate = len(wins) / total if total > 0 else 0.0
+    win_rate = len(wins) / len(closed) if closed else 0.0
 
     rr_values = [t.get("actual_rr", 0) for t in closed if t.get("actual_rr") is not None]
     avg_rr    = sum(rr_values) / len(rr_values) if rr_values else 0.0
 
     gross_profit = sum(r for r in rr_values if r > 0)
     gross_loss   = abs(sum(r for r in rr_values if r < 0))
-    profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else (
+        float("inf") if gross_profit > 0 else 0.0
+    )
 
     # Max consecutive losses
-    max_dd_streak = 0
-    current_streak = 0
+    streak = max_streak = 0
     for t in closed:
         if t.get("outcome") == "SL":
-            current_streak += 1
-            max_dd_streak = max(max_dd_streak, current_streak)
+            streak += 1
+            max_streak = max(max_streak, streak)
         else:
-            current_streak = 0
+            streak = 0
 
-    # Per-market breakdown
+    # Per-setup-type analysis
+    by_setup: dict[str, dict] = {}
+    for t in closed:
+        stype = t.get("setup_type") or "UNKNOWN"
+        if stype not in by_setup:
+            by_setup[stype] = {"total": 0, "wins": 0, "losses": 0}
+        by_setup[stype]["total"] += 1
+        if t.get("outcome") in ("TP1", "TP2", "TP3"):
+            by_setup[stype]["wins"] += 1
+        elif t.get("outcome") == "SL":
+            by_setup[stype]["losses"] += 1
+
+    # Per-market analysis
     by_market: dict[str, dict] = {}
     for t in closed:
-        market = t.get("market", "UNKNOWN")
-        if market not in by_market:
-            by_market[market] = {"total": 0, "wins": 0, "losses": 0, "rr_values": []}
-        by_market[market]["total"] += 1
+        mkt = t.get("market", "UNKNOWN")
+        if mkt not in by_market:
+            by_market[mkt] = {"total": 0, "wins": 0, "losses": 0, "rr_values": []}
+        by_market[mkt]["total"] += 1
         if t.get("outcome") in ("TP1", "TP2", "TP3"):
-            by_market[market]["wins"] += 1
+            by_market[mkt]["wins"] += 1
         elif t.get("outcome") == "SL":
-            by_market[market]["losses"] += 1
+            by_market[mkt]["losses"] += 1
         if t.get("actual_rr") is not None:
-            by_market[market]["rr_values"].append(t["actual_rr"])
+            by_market[mkt]["rr_values"].append(t["actual_rr"])
 
     market_stats = {}
-    for market, data in by_market.items():
-        n = data["total"]
-        w = data["wins"]
-        market_stats[market] = {
-            "total":       n,
-            "wins":        w,
-            "losses":      data["losses"],
-            "win_rate":    w / n if n > 0 else 0.0,
-            "avg_rr":      sum(data["rr_values"]) / len(data["rr_values"]) if data["rr_values"] else 0.0,
+    for mkt, d in by_market.items():
+        n = d["total"]
+        market_stats[mkt] = {
+            "total":    n,
+            "wins":     d["wins"],
+            "losses":   d["losses"],
+            "win_rate": d["wins"] / n if n > 0 else 0.0,
+            "avg_rr":   sum(d["rr_values"]) / len(d["rr_values"]) if d["rr_values"] else 0.0,
         }
 
-    # Per-symbol breakdown
-    by_symbol: dict[str, dict] = {}
-    for t in closed:
-        sym = t.get("symbol", "UNKNOWN")
-        if sym not in by_symbol:
-            by_symbol[sym] = {"total": 0, "wins": 0}
-        by_symbol[sym]["total"] += 1
-        if t.get("outcome") in ("TP1", "TP2", "TP3"):
-            by_symbol[sym]["wins"] += 1
-
     return {
-        "total":           total,
+        "total_signals":   len(signals),
+        "total_trades":    len(trades),
+        "total_watches":   len(watches),
+        "closed":          len(closed),
         "wins":            len(wins),
         "losses":          len(losses),
+        "open":            len(open_t),
+        "tp1_hits":        tp1_hits,
+        "tp2_hits":        tp2_hits,
+        "tp3_hits":        tp3_hits,
         "win_rate":        round(win_rate, 4),
         "avg_rr":          round(avg_rr, 4),
         "profit_factor":   round(profit_factor, 4),
-        "max_drawdown_streak": max_dd_streak,
+        "max_loss_streak": max_streak,
+        "by_setup":        by_setup,
         "by_market":       market_stats,
-        "by_symbol":       {
-            sym: {"total": d["total"], "wins": d["wins"],
-                  "win_rate": d["wins"] / d["total"] if d["total"] > 0 else 0.0}
-            for sym, d in by_symbol.items()
-        },
     }
 
 
-# ── Adaptive Adjustments ──────────────────────────────────────────────────────
+# ── Adaptive Suggestions ───────────────────────────────────────────────────────
 
-def identify_underperformers(stats: dict, min_trades: int = 5, threshold: float = 0.25) -> list[str]:
+def build_suggestions(stats: dict, config: dict) -> tuple[list[str], dict]:
     """
-    Return symbols with insufficient win rate (candidates for disabling).
-    Only considers symbols with at least `min_trades` closed trades.
+    Build human-readable suggested changes + config_updates dict.
+    Does NOT apply changes — returns them for user approval.
     """
-    underperformers = []
-    for sym, data in stats.get("by_symbol", {}).items():
-        if data["total"] >= min_trades and data["win_rate"] < threshold:
-            underperformers.append(sym)
-    return underperformers
-
-
-def adjust_scoring_thresholds(stats: dict, config: dict) -> tuple[dict, list[str]]:
-    """
-    Apply heuristic rules to adjust config scoring thresholds.
-    Returns (updated_config, list_of_changes_made).
-    """
-    changes = []
+    suggestions   = []
+    config_updates: dict = {}
     scoring = config.get("scoring", {})
-    current_min = scoring.get("min_confidence", 70)
+    current_min = scoring.get("min_confidence", 75)
+    win_rate    = stats.get("win_rate", 0)
+    closed      = stats.get("closed", 0)
 
-    win_rate = stats.get("win_rate", 0)
+    if closed < 5:
+        suggestions.append(
+            f"Only {closed} closed trades — not enough data to adjust thresholds yet. "
+            f"Keep trading for 2-3 more weeks."
+        )
+        return suggestions, config_updates
 
+    # Confidence threshold adjustment
     if win_rate < 0.35:
         new_min = min(85, current_min + 5)
         if new_min != current_min:
-            scoring["min_confidence"] = new_min
-            changes.append(f"min_confidence: {current_min} → {new_min} (win rate {win_rate:.0%} < 35%)")
-
-    elif win_rate > 0.65:
-        new_min = max(55, current_min - 3)
+            config_updates["min_confidence"] = new_min
+            config_updates["min_confidence_auto"] = new_min
+            suggestions.append(
+                f"Raise min_confidence {current_min} → {new_min}  "
+                f"(win rate {win_rate:.0%} is too low)"
+            )
+    elif win_rate > 0.65 and closed >= 10:
+        new_min = max(60, current_min - 3)
         if new_min != current_min:
-            scoring["min_confidence"] = new_min
-            changes.append(f"min_confidence: {current_min} → {new_min} (win rate {win_rate:.0%} > 65%)")
+            config_updates["min_confidence"] = new_min
+            config_updates["min_confidence_auto"] = new_min
+            suggestions.append(
+                f"Lower min_confidence {current_min} → {new_min}  "
+                f"(win rate {win_rate:.0%} is strong — can accept more signals)"
+            )
 
-    config["scoring"] = scoring
+    # Underperforming setup types
+    for stype, data in stats.get("by_setup", {}).items():
+        if data["total"] >= 5 and (data["wins"] / data["total"]) < 0.25:
+            suggestions.append(
+                f"Setup '{stype}' has only {data['wins']}/{data['total']} wins — "
+                f"consider reducing weight on this pattern"
+            )
 
-    # Disable underperformers
-    underperformers = identify_underperformers(stats)
-    existing_disabled = set(config.get("disabled_symbols", []))
-    new_disabled = [s for s in underperformers if s not in existing_disabled]
-    if new_disabled:
-        config["disabled_symbols"] = list(existing_disabled) + new_disabled
-        changes.append(f"Disabled symbols: {', '.join(new_disabled)}")
+    # Underperforming markets
+    disabled = set(config.get("disabled_symbols", []))
+    new_disabled = list(disabled)
+    for mkt, data in stats.get("by_market", {}).items():
+        if data["total"] >= 5 and data["win_rate"] < 0.20:
+            suggestions.append(
+                f"Market {mkt}: only {data['win_rate']:.0%} win rate — "
+                f"poor market conditions, consider pausing it"
+            )
 
-    return config, changes
+    if not suggestions:
+        suggestions.append("Performance looks good — no changes needed this week.")
+
+    if config_updates:
+        config_updates["disabled_symbols"] = new_disabled
+
+    return suggestions, config_updates
 
 
-# ── Telegram summary ──────────────────────────────────────────────────────────
+# ── Pending Changes Store ─────────────────────────────────────────────────────
 
-def _send_telegram_summary(text: str) -> None:
-    """Send weekly summary to Telegram."""
+def save_pending_changes(suggestions: list[str], config_updates: dict) -> None:
+    PENDING_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PENDING_FILE.write_text(json.dumps({
+        "generated_at":   datetime.now(timezone.utc).isoformat(),
+        "suggestions":    suggestions,
+        "config_updates": config_updates,
+    }, indent=2))
+
+
+def get_pending_changes() -> dict | None:
+    if not PENDING_FILE.exists():
+        return None
+    try:
+        return json.loads(PENDING_FILE.read_text())
+    except Exception:
+        return None
+
+
+def apply_pending_changes() -> str:
+    """Apply stored pending changes to config.json. Returns summary string."""
+    pending = get_pending_changes()
+    if not pending:
+        return "No pending changes found."
+
+    updates = pending.get("config_updates", {})
+    if not updates:
+        PENDING_FILE.unlink(missing_ok=True)
+        return "No config changes were suggested."
+
+    config = load_config()
+
+    if "min_confidence" in updates:
+        config["scoring"]["min_confidence"] = updates["min_confidence"]
+    if "min_confidence_auto" in updates:
+        config.setdefault("auto_scan", {})["min_confidence_auto"] = updates["min_confidence_auto"]
+    if "disabled_symbols" in updates:
+        config["disabled_symbols"] = updates["disabled_symbols"]
+
+    save_config(config)
+    PENDING_FILE.unlink(missing_ok=True)
+
+    applied = "\n".join(f"• {s}" for s in pending.get("suggestions", []))
+    logger.info(f"Pending config changes applied:\n{applied}")
+    return applied
+
+
+def discard_pending_changes() -> None:
+    PENDING_FILE.unlink(missing_ok=True)
+
+
+# ── Message Formatting ─────────────────────────────────────────────────────────
+
+def _build_review_message(stats: dict, suggestions: list[str], has_updates: bool) -> str:
+    import pytz
+    IST = pytz.timezone("Asia/Kolkata")
+    now_ist = datetime.now(IST)
+
+    # Date range
+    week_start = (now_ist - timedelta(days=7)).strftime("%d %b")
+    week_end   = now_ist.strftime("%d %b %Y")
+
+    lines = [
+        "📊 <b>Weekly Signal Review</b>",
+        f"<i>{week_start} – {week_end}</i>",
+        "",
+        f"Signals sent: <b>{stats['total_trades']}</b> TRADE  |  <b>{stats['total_watches']}</b> WATCH",
+    ]
+
+    closed = stats["closed"]
+    if closed > 0:
+        wins   = stats["wins"]
+        losses = stats["losses"]
+        open_n = stats["open"]
+        wr     = stats["win_rate"]
+        lines += [
+            "",
+            "<b>TRADE outcomes:</b>",
+            f"  ✅ TP hit:     {wins}  (TP1:{stats['tp1_hits']} TP2:{stats['tp2_hits']} TP3:{stats['tp3_hits']})",
+            f"  ❌ SL hit:     {losses}",
+            f"  ⏳ Still open: {open_n}",
+            f"  Win rate: <b>{wr:.0%}</b>  |  Avg RR: <b>{stats['avg_rr']:.2f}x</b>  |  PF: <b>{stats['profit_factor']:.2f}</b>",
+        ]
+        if stats["max_loss_streak"] >= 3:
+            lines.append(f"  ⚠️ Max loss streak: {stats['max_loss_streak']}")
+    else:
+        lines += ["", "<i>No closed trades yet — outcomes update each scan.</i>"]
+
+    # Setup type breakdown
+    by_setup = {k: v for k, v in stats.get("by_setup", {}).items() if v["total"] >= 2}
+    if by_setup:
+        lines += ["", "<b>Setup performance:</b>"]
+        for stype, d in sorted(by_setup.items(), key=lambda x: -x[1]["wins"]):
+            wr_s = d["wins"] / d["total"] if d["total"] else 0
+            emoji = "🟢" if wr_s >= 0.5 else "🔴"
+            lines.append(f"  {emoji} {stype}: {d['wins']}/{d['total']} ({wr_s:.0%})")
+
+    # Market breakdown
+    if stats.get("by_market"):
+        lines += ["", "<b>By market:</b>"]
+        for mkt, d in stats["by_market"].items():
+            emoji = "🟢" if d["win_rate"] >= 0.5 else "🔴"
+            lines.append(
+                f"  {emoji} {mkt}: {d['win_rate']:.0%} WR  "
+                f"| {d['total']} trades | avg RR {d['avg_rr']:.2f}x"
+            )
+
+    # Suggestions
+    lines += ["", "<b>Analysis &amp; suggestions:</b>"]
+    for s in suggestions:
+        lines.append(f"  • {s}")
+
+    if has_updates:
+        lines += ["", "👇 <b>Tap to apply config changes:</b>"]
+    else:
+        lines += ["", "<i>No config changes required this week.</i>"]
+
+    return "\n".join(lines)
+
+
+def get_weekly_summary() -> str:
+    """For /status inline button — quick read-only summary."""
+    signals = load_week_signals(days=7)
+    if not signals:
+        return "📊 <b>Weekly Summary</b>\n\nNo signals sent in the past 7 days."
+    stats = compute_stats(signals)
+    config = load_config()
+    suggestions, has_updates = build_suggestions(stats, config)
+    return _build_review_message(stats, suggestions, bool(has_updates))
+
+
+# ── Telegram Delivery ──────────────────────────────────────────────────────────
+
+def _send_review_telegram(text: str, reply_markup: dict | None = None) -> None:
     import httpx
     config  = load_config()
     token   = os.environ.get("TELEGRAM_BOT_TOKEN") or config.get("telegram", {}).get("bot_token", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")   or config.get("telegram", {}).get("chat_id", "")
     if not token or not chat_id:
-        logger.warning("Telegram not configured — weekly summary not sent")
+        logger.warning("Telegram not configured — weekly review not sent")
         return
     try:
-        url = f"{TELEGRAM_API}/bot{token}/sendMessage"
-        httpx.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=10)
-        logger.info("Weekly summary sent to Telegram")
-    except Exception as e:
-        logger.error(f"Failed to send weekly summary: {e}")
-
-
-def get_weekly_summary() -> str:
-    """Build and return the weekly summary string (for /status inline button)."""
-    trades = load_trade_history(days=7)
-    closed = [t for t in trades if t.get("outcome") is not None]
-    if not closed:
-        return "📊 <b>Weekly Summary</b>\n\nNo closed trades in the past 7 days."
-    stats = compute_stats(closed)
-    return _build_summary_text(stats, changes=[])
-
-
-def _build_summary_text(stats: dict, changes: list[str]) -> str:
-    win_rate = stats.get("win_rate", 0)
-    avg_rr   = stats.get("avg_rr", 0)
-    pf       = stats.get("profit_factor", 0)
-    dd       = stats.get("max_drawdown_streak", 0)
-    total    = stats.get("total", 0)
-    wins     = stats.get("wins", 0)
-
-    lines = [
-        "📊 <b>Weekly Performance Review</b>",
-        f"Period: last 7 days | Closed trades: {total}",
-        "",
-        f"Win Rate:       {win_rate:.0%} ({wins}/{total})",
-        f"Avg RR:         {avg_rr:.2f}",
-        f"Profit Factor:  {pf:.2f}",
-        f"Max DD Streak:  {dd} losses",
-        "",
-        "<b>By Market:</b>",
-    ]
-    for market, data in stats.get("by_market", {}).items():
-        wr = data.get("win_rate", 0)
-        emoji = "🟢" if wr >= 0.5 else "🔴"
-        lines.append(
-            f"  {emoji} {market}: {wr:.0%} win | {data.get('total', 0)} trades | "
-            f"avg RR {data.get('avg_rr', 0):.2f}"
+        payload: dict = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        httpx.post(
+            f"{TELEGRAM_API}/bot{token}/sendMessage",
+            json=payload, timeout=10,
         )
-
-    if changes:
-        lines.extend(["", "<b>Config Changes Made:</b>"])
-        for c in changes:
-            lines.append(f"  • {c}")
-    else:
-        lines.extend(["", "No config changes this week."])
-
-    lines.append(f"\n<i>Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</i>")
-    return "\n".join(lines)
+        logger.info("Weekly review sent to Telegram")
+    except Exception as e:
+        logger.error(f"Failed to send weekly review: {e}")
 
 
-# ── Main entry point ──────────────────────────────────────────────────────────
-
-def _write_stamp() -> None:
-    """Record that the weekly review ran (used by main.py catch-up logic)."""
-    from datetime import timezone
-    stamp = Path(__file__).parent / "data" / ".weekly_review_last_run"
-    stamp.parent.mkdir(parents=True, exist_ok=True)
-    stamp.write_text(datetime.now(timezone.utc).isoformat())
-
+# ── Main Entry Point ───────────────────────────────────────────────────────────
 
 def run_weekly_review() -> None:
-    """Full weekly review: analyze → adjust → save config → send summary."""
     logger.info("=== Weekly Review Started ===")
 
-    trades = load_trade_history(days=7)
-    closed = [t for t in trades if t.get("outcome") is not None]
+    signals = load_week_signals(days=7)
+    logger.info(f"Signals loaded: {len(signals)}")
 
-    logger.info(f"Total trades (7 days): {len(trades)} | Closed: {len(closed)}")
+    stats      = compute_stats(signals)
+    config     = load_config()
+    suggestions, config_updates = build_suggestions(stats, config)
 
-    if len(closed) < 10:
-        msg = (
-            f"📊 <b>Weekly Review</b>\n\n"
-            f"Only {len(closed)} closed trades this week — "
-            f"need at least 10 for meaningful analysis.\n"
-            f"Keep trading and the system will self-adjust automatically."
-        )
-        logger.info("Insufficient data for analysis — skipping config update")
-        _send_telegram_summary(msg)
-        _write_stamp()
-        return
+    has_updates = bool(config_updates)
+    message     = _build_review_message(stats, suggestions, has_updates)
 
-    stats = compute_stats(closed)
-
-    config = load_config()
-    updated_config, changes = adjust_scoring_thresholds(stats, config)
-
-    if changes:
-        save_config(updated_config)
-        logger.info(f"Config updated: {changes}")
+    if has_updates:
+        save_pending_changes(suggestions, config_updates)
+        reply_markup = {
+            "inline_keyboard": [[
+                {"text": "✅ Apply Changes", "callback_data": "weekly_approve"},
+                {"text": "❌ Skip This Week", "callback_data": "weekly_skip"},
+            ]]
+        }
     else:
-        logger.info("No config changes required this week")
+        discard_pending_changes()
+        reply_markup = None
 
-    summary = _build_summary_text(stats, changes)
-    _send_telegram_summary(summary)
-    _write_stamp()
+    _send_review_telegram(message, reply_markup)
     logger.info("=== Weekly Review Complete ===")
 
 

@@ -131,7 +131,7 @@ def _format_trade_message(sym: str, sym_data: dict) -> str:
 
     import pytz
     IST = pytz.timezone("Asia/Kolkata")
-    now = datetime.now(IST).strftime("%Y-%m-%d %H:%M IST")
+    now = datetime.now(IST).strftime("%d %b %Y  %I:%M %p IST")
     return "\n".join([
         f"{dir_emoji} <b>SIGNAL — {sym} {direction}</b>",
         f"Market: {market}  |  Grade: {grade_emoji} {grade}  |  Confidence: {confidence:.0f}%",
