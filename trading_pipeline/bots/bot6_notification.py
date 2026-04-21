@@ -129,7 +129,9 @@ def _format_trade_message(sym: str, sym_data: dict) -> str:
     tw = bd.get("trigger_weighted", 0)
     ib = bd.get("inducement_bonus", 0)
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    import pytz
+    IST = pytz.timezone("Asia/Kolkata")
+    now = datetime.now(IST).strftime("%Y-%m-%d %H:%M IST")
     return "\n".join([
         f"{dir_emoji} <b>SIGNAL — {sym} {direction}</b>",
         f"Market: {market}  |  Grade: {grade_emoji} {grade}  |  Confidence: {confidence:.0f}%",
