@@ -242,35 +242,93 @@ def _fetch_ccxt(symbol: str, timeframes: list[str], min_bars: int) -> dict:
     }
 
 
+def _fetch_yfinance(symbol: str, timeframes: list[str], min_bars: int) -> dict:
+    """
+    Fetch OHLCV via yfinance — free, no auth needed.
+    Works for: NIFTY stocks (.NS), Forex (=X), Commodities (=F).
+    Falls back gracefully when TV is unavailable or has no data.
+    """
+    try:
+        import yfinance as yf
+    except ImportError:
+        return {"fetch_status": "error", "error": "yfinance not installed"}
+
+    YF_TF_MAP = {
+        "1m": ("1m",  "5d"),
+        "5m": ("5m",  "60d"),
+        "15m":("15m", "60d"),
+        "1h": ("1h",  "60d"),
+        "4h": ("1h",  "60d"),   # yfinance has no 4h — use 1h, downsample if needed
+        "1d": ("1d",  "1y"),
+    }
+
+    ticker  = yf.Ticker(symbol)
+    tf_data: dict = {}
+
+    for tf in timeframes:
+        yf_tf, period = YF_TF_MAP.get(tf, ("1h", "60d"))
+        try:
+            df = ticker.history(period=period, interval=yf_tf, auto_adjust=True)
+            if df is None or len(df) < min_bars:
+                logger.warning(f"{symbol} {tf}: yfinance returned {len(df) if df is not None else 0} bars")
+                tf_data[tf] = None
+                continue
+            tf_data[tf] = {
+                "opens":      df["Open"].tolist(),
+                "highs":      df["High"].tolist(),
+                "lows":       df["Low"].tolist(),
+                "closes":     df["Close"].tolist(),
+                "volumes":    df["Volume"].tolist(),
+                "timestamps": [str(ts) for ts in df.index.tolist()],
+                "count":      len(df),
+            }
+        except Exception as e:
+            logger.error(f"{symbol} {tf} yfinance error: {e}")
+            tf_data[tf] = None
+
+    current_price = None
+    for tf_key in ["1m", "5m", "15m", "1h", "4h", "1d"]:
+        closes = (tf_data.get(tf_key) or {}).get("closes")
+        if closes:
+            current_price = closes[-1]
+            break
+
+    return {
+        "timeframes":    tf_data,
+        "current_price": current_price,
+        "fetch_status":  "ok" if any(v is not None for v in tf_data.values()) else "error",
+        "fetched_at":    datetime.utcnow().isoformat(),
+        "source":        "yfinance",
+    }
+
+
 def _fetch_symbol(symbol: str, market: str, timeframes: list[str], min_bars: int) -> dict:
     """
     Data source routing:
-    - TradingView: used when TRADINGVIEW_USERNAME + TRADINGVIEW_PASSWORD are set
-    - ccxt/OKX:    fallback for CRYPTO when TV creds are absent
-    - TV without creds is unreliable (delayed/blocked) so we skip it for CRYPTO
+      1. TradingView  — primary for all markets (requires TV credentials)
+      2. ccxt / OKX   — fallback for CRYPTO if TV fails or no creds
+      3. yfinance     — fallback for NIFTY / FOREX / GOLD if TV fails or no creds
     """
     tv_creds = bool(
         os.environ.get("TRADINGVIEW_USERNAME") and
         os.environ.get("TRADINGVIEW_PASSWORD")
     )
 
+    # ── Try TradingView first (best data quality) ─────────────────────────────
     if tv_creds and symbol in TV_SYMBOL_MAP:
         result = _fetch_tradingview(symbol, timeframes, min_bars)
-        # If TV failed for a CRYPTO symbol, fall back to ccxt immediately
-        if result.get("fetch_status") == "error" and market == "CRYPTO":
-            logger.info(f"{symbol}: TV failed, trying ccxt fallback")
-            return _fetch_ccxt(symbol, timeframes, min_bars)
-        return result
+        if result.get("fetch_status") == "ok":
+            return result
+        logger.info(f"{symbol}: TV fetch failed — using fallback")
 
+    # ── Fallback by market type ───────────────────────────────────────────────
     if market == "CRYPTO":
-        logger.info(f"{symbol}: no TV creds — using ccxt/OKX")
+        logger.info(f"{symbol}: using ccxt/OKX")
         return _fetch_ccxt(symbol, timeframes, min_bars)
 
-    # Non-CRYPTO without creds: try TV in delayed mode (NIFTY/FOREX/GOLD)
-    if symbol in TV_SYMBOL_MAP:
-        return _fetch_tradingview(symbol, timeframes, min_bars)
-
-    return {"fetch_status": "error", "error": f"No data source configured for {symbol}"}
+    # NIFTY / FOREX / GOLD — yfinance (free, works with .NS =X =F suffixes)
+    logger.info(f"{symbol}: using yfinance fallback")
+    return _fetch_yfinance(symbol, timeframes, min_bars)
 
 
 class DataCollectorBot:

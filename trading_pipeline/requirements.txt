@@ -3,9 +3,10 @@
 
 # Market data
 git+https://github.com/rongardF/tvdatafeed.git  # TradingView data — NIFTY/FOREX/GOLD/CRYPTO
+yfinance>=0.2.40      # Fallback for NIFTY/FOREX/GOLD (free, no auth needed)
 ccxt==4.3.68          # OKX fallback for CRYPTO
 requests==2.32.3      # HTTP client for API calls
-pandas==2.2.2         # tvDatafeed returns DataFrames
+pandas==2.2.2         # tvDatafeed/yfinance return DataFrames
 
 # Telegram bot
 python-telegram-bot[job-queue]==21.3
