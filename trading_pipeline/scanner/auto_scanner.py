@@ -146,6 +146,168 @@ def _mark_sent(sym: str, sym_data: dict) -> None:
     _save_dedup(store)
 
 
+# ── Proximity (Heads-Up) Alerts ────────────────────────────────────────────────
+
+PROXIMITY_WINDOW_MINUTES = 15   # Don't re-alert within 15 min for same zone
+
+
+def _proximity_dedup_key(sym: str, sym_data: dict) -> str:
+    direction = sym_data.get("setup", {}).get("direction", "UNKNOWN")
+    return f"prox_{sym}_{direction}"
+
+
+def _check_proximity(sym_data: dict, proximity_pct: float) -> tuple[bool, str]:
+    """
+    Return (approaching, description) if current price is within proximity_pct
+    of the key OB or FVG entry level but has NOT yet entered the zone.
+
+    LONG: price is above OB high (approaching from above, about to fall in)
+    SHORT: price is below OB low (approaching from below, about to rise in)
+    """
+    setup     = sym_data.get("setup", {})
+    price     = sym_data.get("current_price", 0.0)
+    direction = setup.get("direction", "LONG")
+    ob        = setup.get("order_block", {})
+    fvg       = setup.get("fvg", {})
+
+    if not price or setup.get("setup_score", 0) < 25:
+        return False, ""
+
+    # ── Order Block proximity ──────────────────────────────────────────────────
+    if ob.get("found") and not ob.get("already_touched"):
+        if direction == "LONG":
+            ob_high = ob.get("ob_high", 0.0)
+            if ob_high and price > ob_high:
+                dist = (price - ob_high) / price
+                if 0 < dist <= proximity_pct:
+                    return True, f"Price {dist*100:.2f}% above OB zone — about to fall in"
+        else:
+            ob_low = ob.get("ob_low", 0.0)
+            if ob_low and price < ob_low:
+                dist = (ob_low - price) / price
+                if 0 < dist <= proximity_pct:
+                    return True, f"Price {dist*100:.2f}% below OB zone — about to rise in"
+
+    # ── FVG proximity (fallback if no fresh OB) ────────────────────────────────
+    if fvg.get("present"):
+        if direction == "LONG":
+            fvg_low = fvg.get("fvg_low", 0.0)
+            if fvg_low and price > fvg_low:
+                dist = (price - fvg_low) / price
+                if 0 < dist <= proximity_pct:
+                    return True, f"Price {dist*100:.2f}% above FVG zone — about to fill in"
+        else:
+            fvg_high = fvg.get("fvg_high", 0.0)
+            if fvg_high and price < fvg_high:
+                dist = (fvg_high - price) / price
+                if 0 < dist <= proximity_pct:
+                    return True, f"Price {dist*100:.2f}% below FVG zone — about to fill in"
+
+    return False, ""
+
+
+def _send_proximity_alert(sym: str, sym_data: dict, prox_desc: str, config: dict) -> None:
+    """Send a Heads-Up alert that price is approaching the entry zone."""
+    import httpx
+    import pytz
+
+    setup      = sym_data.get("setup", {})
+    ctx        = sym_data.get("context", {})
+    direction  = setup.get("direction", "LONG")
+    ob         = setup.get("order_block", {})
+    fvg        = setup.get("fvg", {})
+    price      = sym_data.get("current_price", 0.0)
+    market     = sym_data.get("market", "")
+    bias       = ctx.get("htf_bias", "?")
+    setup_type = setup.get("setup_type", "—")
+
+    ob_high = ob.get("ob_high")
+    ob_low  = ob.get("ob_low")
+    ob_mid  = ob.get("ob_mid")
+
+    def _fmt(v):
+        if v is None:
+            return "—"
+        return f"{v:,.2f}" if abs(v) >= 100 else f"{v:.5f}"
+
+    IST = pytz.timezone("Asia/Kolkata")
+    ts  = datetime.now(IST).strftime("%d %b  %I:%M %p IST")
+
+    if ob_high and ob_low:
+        zone_str = f"{_fmt(ob_low)} – {_fmt(ob_high)}"
+    elif fvg.get("present"):
+        zone_str = f"{_fmt(fvg.get('fvg_low'))} – {_fmt(fvg.get('fvg_high'))}"
+    else:
+        zone_str = "—"
+
+    entry_str = _fmt(ob_mid)
+    sl_str    = _fmt(ob_low) if direction == "LONG" else _fmt(ob_high)
+
+    text = (
+        f"⚡ <b>HEADS UP — {sym} {direction}</b>\n"
+        f"Market: {market}  |  HTF Bias: {bias}\n\n"
+        f"<b>{prox_desc}</b>\n\n"
+        f"Zone:        <code>{zone_str}</code>\n"
+        f"Entry at:    <code>{entry_str}</code>  (OB midpoint)\n"
+        f"SL:          <code>{sl_str}</code>\n\n"
+        f"Setup: {setup_type}\n"
+        f"<i>Full TRADE signal fires on BOS confirmation</i>\n\n"
+        f"<i>{ts}</i>"
+    )
+
+    token   = os.environ.get("TELEGRAM_BOT_TOKEN") or config.get("telegram", {}).get("bot_token", "")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")   or config.get("telegram", {}).get("chat_id", "")
+    if not token or not chat_id:
+        return
+    try:
+        httpx.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+            timeout=10.0,
+        )
+        logger.info(f"  {sym}: ⚡ HEADS UP sent — {prox_desc}")
+    except Exception as e:
+        logger.warning(f"  {sym}: proximity alert send error: {e}")
+
+
+def _maybe_send_proximity(sym: str, sym_data: dict, config: dict) -> None:
+    """
+    Check proximity and send Heads-Up alert if price is approaching entry zone.
+    Uses 15-min dedup so the same zone doesn't spam every minute.
+    Only fires when there is NO full TRADE signal (to avoid double messaging).
+    """
+    decision = sym_data.get("decision", {})
+    if decision.get("action") == "TRADE":
+        return  # Full signal already firing — no need for heads-up
+
+    proximity_pct = config.get("proximity_alert_pct", 0.005)
+    approaching, prox_desc = _check_proximity(sym_data, proximity_pct)
+    if not approaching:
+        return
+
+    # Dedup — don't repeat within PROXIMITY_WINDOW_MINUTES
+    prox_key = _proximity_dedup_key(sym, sym_data)
+    store    = _load_dedup()
+    entry    = store.get(prox_key)
+    if entry:
+        sent_at = datetime.fromisoformat(entry["sent_at"])
+        elapsed = (datetime.now(timezone.utc) - sent_at).total_seconds()
+        if elapsed < PROXIMITY_WINDOW_MINUTES * 60:
+            logger.debug(f"  {sym}: proximity suppressed ({elapsed/60:.0f}m ago)")
+            return
+
+    _send_proximity_alert(sym, sym_data, prox_desc, config)
+
+    store = _prune_dedup(store)
+    store[prox_key] = {
+        "sent_at": datetime.now(timezone.utc).isoformat(),
+        "action":  "PROXIMITY",
+        "grade":   "heads_up",
+        "confidence": 0.0,
+    }
+    _save_dedup(store)
+
+
 # ── Pipeline runners ───────────────────────────────────────────────────────────
 
 def _get_trade_type_config(trade_type: str, config: dict) -> dict:
@@ -256,6 +418,10 @@ def _process_symbol(
     action   = decision.get("action", "NO_TRADE")
     conf     = decision.get("confidence_score", 0.0)
     market   = sym_data.get("market", "")
+
+    # Proximity alert — send Heads-Up if price is approaching the entry zone
+    # but hasn't triggered a full signal yet (gives user 1-3 min lead time)
+    _maybe_send_proximity(sym, sym_data, config)
 
     # Qualify: must meet minimum confidence
     qualifies = (action == "TRADE" and conf >= min_conf) or \

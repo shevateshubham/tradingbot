@@ -76,6 +76,7 @@
     "send_watches":           false,
     "watch_followup_minutes": 5
   },
+  "proximity_alert_pct": 0.005,
   "min_bars_required": 30,
   "volume_spike_multiplier": 1.5,
   "displacement_ratio_threshold": 0.70,
